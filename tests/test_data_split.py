@@ -86,7 +86,11 @@ def test_load_splits_a_temporary_dataset_in_original_file_order(tmp_path, monkey
     import pipeline.data as data
 
     DataFrame(
-        {"video_id": ["v1", "v2", "v3"], "author_id": ["a1", "a2", "a3"]}
+        {
+            "video_id": ["v1", "v2", "v3"],
+            "author_id": ["a1", "a2", "a3"],
+            "tag": ["10", "20,30", "30"],
+        }
     ).to_csv(tmp_path / "video_features_basic_pure.csv", index=False)
     DataFrame(
         {
@@ -115,3 +119,6 @@ def test_load_splits_a_temporary_dataset_in_original_file_order(tmp_path, monkey
     assert test["video_id"].tolist() == ["missing"]
     assert train["author_id"].tolist() == ["a2", "a1"]
     assert test["author_id"].tolist() == ["UNK"]
+    assert train["tag"].tolist() == ["20,30", "10"]
+    assert val["tag"].tolist() == ["30"]
+    assert test["tag"].isna().all()

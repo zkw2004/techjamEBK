@@ -75,13 +75,14 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
 
     video_features = pd.read_csv(
         video_path,
-        usecols=["video_id", "author_id"],
+        usecols=["video_id", "author_id", "tag"],
         dtype=str,
     )
 
     vid2author = dict(
         zip(video_features["video_id"], video_features["author_id"], strict=True)
     )
+    vid2tag = dict(zip(video_features["video_id"], video_features["tag"], strict=True))
 
     frames = []
 
@@ -91,7 +92,11 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
 
     rows = pd.concat(frames, ignore_index=True)
 
-    rows["author_id"] = rows["video_id"].astype(str).map(vid2author).fillna("UNK")
+    video_ids = rows["video_id"].astype(str)
+    rows["author_id"] = video_ids.map(vid2author).fillna("UNK")
+    # Tags are static, pre-impression metadata used by B4's user-tag affinity.
+    # Keep missing tags missing so the feature can apply its neutral fallback.
+    rows["tag"] = video_ids.map(vid2tag)
 
     dates = pd.to_datetime(rows["date"].astype(str), format="%Y%m%d")
 
