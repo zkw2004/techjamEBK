@@ -18,7 +18,9 @@ import pytest
 
 from pipeline.data import DATA_DIR, FIELDS, LABEL
 from pipeline.models import MODEL_REGISTRY
+from pipeline.models.deepfm import DeepFMModel
 from pipeline.models.fm import BASELINE_VALIDATION_PRIMARY, FM
+from pipeline.models.lgbm import LGBM
 from pipeline.models.popularity import (
     POPULARITY_REFERENCE,
     RANDOM_REFERENCE,
@@ -176,6 +178,73 @@ def test_fm_training_is_deterministic_and_unseen_categories_are_supported():
     np.testing.assert_array_equal(first, second)
     assert first.shape == (1,)
     assert np.isfinite(first).all()
+
+
+@pytest.mark.parametrize("loss", ["pointwise", "lambdarank"])
+def test_lgbm_objectives_learn_with_categorical_features(loss):
+    X_train = np.asarray(
+        [["u1", "good"], ["u1", "bad"], ["u2", "good"], ["u2", "bad"]] * 8,
+        dtype=object,
+    )
+    y_train = np.asarray([1, 0, 1, 0] * 8)
+    groups = {
+        "train": np.asarray(["u1", "u1", "u2", "u2"] * 8),
+        "val": np.asarray(["u1", "u1", "u2", "u2"]),
+    }
+    X_val = np.asarray(
+        [["u1", "good"], ["u1", "bad"], ["u2", "good"], ["u2", "bad"]],
+        dtype=object,
+    )
+    y_val = np.asarray([1, 0, 1, 0])
+    model = LGBM(loss=loss, n_estimators=30, min_data_in_leaf=1, seed=9)
+
+    model.fit(X_train, y_train, X_val, y_val, groups=groups)
+    scores = model.predict(X_val)
+
+    assert scores.shape == (4,)
+    assert np.isfinite(scores).all()
+    assert scores[0] > scores[1]
+    assert scores[2] > scores[3]
+    assert model.best_epoch >= 1
+    assert np.isfinite(model.predict(np.asarray([["new-user", "unseen"]], dtype=object))).all()
+
+
+def test_lambdarank_group_sizes_cover_each_row_once():
+    sizes = LGBM._group_sizes(np.asarray(["u2", "u1", "u2", "u3", "u1"]))
+    np.testing.assert_array_equal(sizes, [2, 2, 1])
+    assert sizes.sum() == 5
+
+
+def test_deepfm_learns_a_repeated_pattern_and_handles_unknown_categories():
+    positive = ["u1", "v-good", "home"]
+    negative = ["u2", "v-bad", "search"]
+    X_train = np.asarray([positive] * 24 + [negative] * 24, dtype=object)
+    y_train = np.asarray([1] * 24 + [0] * 24, dtype=np.float32)
+    model = DeepFMModel(
+        emb_dim=4, mlp=(16, 8), dropout=0.0, seed=4,
+        lr=0.02, max_epochs=8, batch_size=16, patience=1,
+    )
+
+    model.fit(X_train, y_train, X_train, y_train)
+    scores = model.predict(np.asarray([positive, negative, ["new", "new", "new"]]))
+
+    assert scores.shape == (3,)
+    assert np.isfinite(scores).all()
+    assert scores[0] > scores[1]
+    assert 1 <= model.best_epoch <= 8
+
+
+def test_deepfm_is_deterministic_for_a_fixed_seed():
+    X = np.asarray([["u1", "a"], ["u1", "b"], ["u2", "a"], ["u2", "b"]] * 3)
+    y = np.asarray([1, 0, 0, 1] * 3, dtype=np.float32)
+    models = [
+        DeepFMModel(emb_dim=2, mlp=(4,), dropout=0.0, seed=12,
+                    max_epochs=2, batch_size=4)
+        for _ in range(2)
+    ]
+    for model in models:
+        model.fit(X, y, None, None)
+    np.testing.assert_array_equal(models[0].predict(X), models[1].predict(X))
 
 
 @requires_kuairand_data
