@@ -419,3 +419,174 @@ branch `feat/C4-lightgbm`, implement C4 per §3 step 2, and run the
 `gen_user_author_affinity` lift benchmark. If #19 is still open, ask the
 user whether to merge it (`gh pr merge 19`) — do not push main directly, and
 do not start C4 from a stale base.
+
+---
+
+## 11. C4→C7 implementation playbook
+
+The per-task recipe to get from here to a complete Workstream C. Each task:
+branch `feat/<ID>-…` from post-#19 main, work test-first against the §9.3
+acceptance criteria, run the §8 ritual, update `ethanprogress.md` with
+measured numbers, small PR. Models plug in via `pipeline/models/__init__.py`
+`@register("<name>")` and must satisfy the frozen 8.9 protocol
+`fit(X_train, y_train, X_val, y_val, groups=None)` / `predict(X) -> scores`.
+`train.py::_new_model` passes `seed, loss, parents, blend_method,
+negative_sampling` plus all hparams as constructor kwargs — accept and
+ignore what you don't use (`**hparams`).
+
+### C4 — LightGBM (`feat/C4-lightgbm`)
+
+**Files:** `pipeline/models/lgbm.py`, plus a small `pipeline/train.py`
+change (both Ethan-owned).
+
+1. **Group plumbing (the one real design decision).** LambdaRank needs a
+   per-user group array, and `_fit_and_predict` currently calls
+   `model.fit(...)` without `groups`. Fix in `train.py`: pass
+   `groups=(train_user_ids, val_user_ids_or_None)` — the frozen protocol
+   already has the `groups=None` slot, and a tuple of id arrays keeps the
+   signature unchanged. Models that don't rank ignore it.
+2. **Inside the model:** rows are NOT contiguous by user (organiser row
+   order). For lambdarank, stable-sort train rows by user id internally,
+   build `group = counts per user in sorted order`, train on the sorted
+   matrix; do the same for the eval set. `predict` must return scores in
+   the ORIGINAL input row order (predict needs no groups).
+3. **Objectives:** `binary` (pointwise) and `lambdarank`
+   (`label_gain=[0,1]` for binary labels, `eval_at=[5]`). Integer
+   label-encode the categorical FIELDS with train-fitted first-seen vocabs +
+   UNK slot — copy the pattern from `fm.py` (trap 7: never one-hot). Pass
+   `categorical_feature` for the ID columns.
+4. **Early stopping:** `early_stopping_rounds` against the PROVIDED
+   `X_val/y_val` — in screen/full flows that is an internal fold, never
+   official validation (the runner guarantees this). Expose `best_epoch`
+   (best_iteration) the way `fm.py` does so `_run_full`'s median-epoch
+   refit keeps working; honour `num_boost_round` from hparams (screen caps
+   clamp it via `SCREEN_BUDGET_CAPS`).
+5. **Determinism:** `seed=seed`, `deterministic=True`,
+   `force_row_wise=True`, `num_threads=1` (thread-order reductions break
+   the C1 same-seed guarantee — verify with `audit_determinism`).
+6. **Tests:** synthetic fixture (learnable pattern, ~15% positives);
+   pointwise beats random on the fixture; lambdarank group array asserted
+   correct via a spy; original-row-order prediction asserted after internal
+   sorting; dataset-backed reference run recorded in ethanprogress.
+7. **Then the innovation benchmark:** full-tier LightGBM with
+   `features=[FIELDS..., "user_ctr", "video_ctr", ...]` vs the same +
+   `"gen_user_author_affinity"` (vet it first via
+   `codegen.vet_generated_feature`). Record both primaries and the delta in
+   `ethanprogress.md`; judge with `gate.accept`, and write the pair as
+   evidence records (`pipeline/evidence.py`) with the hypothesis "prior
+   user-author exposure predicts long views". This number is the C4b story.
+
+### C5 — DeepFM (`feat/C5-deepfm`)
+
+**Files:** `pipeline/models/deepfm.py`.
+
+1. **Architecture:** copy plan Appendix A.4 verbatim — per-field
+   `nn.Embedding`, linear terms + bias, FM second-order via the O(n)
+   identity `0.5 * ((Σv)² − Σv²)`, MLP `[256,128,64]` + dropout, raw logit
+   out, `BCEWithLogitsLoss`, Adam.
+2. **Encoding:** the same train-fitted per-field vocab + UNK pattern as
+   `fm.py`/C4; `field_dims` from the vocab sizes; continuous feature
+   columns (registered features like ctr rates) either bucketise to ids or
+   concatenate to the MLP input — bucketising is simpler and consistent.
+3. **Budget:** epochs 1–5, early-stop patience **1** on provided X_val
+   (CTR models peak at 1–3 epochs, trap 11), batch 2048–4096, CPU
+   (`torch.set_num_threads` modest); the plan requires <10 min CPU
+   training. `_seed_everything` already forces deterministic torch — keep
+   dataloader order fixed (no shuffling workers; shuffle via a seeded
+   generator if at all).
+4. Expose `best_epoch`; honour `max_epochs` hparam (screen cap = 3).
+5. **Tests:** loss decreases on a learnable fixture; deterministic across
+   two same-seed fits; unseen categories hit UNK; wall-time sanity marker
+   for the real run recorded in ethanprogress (not a hard test).
+
+### C6 — Optuna (`feat/C6-optuna`)
+
+**Files:** new `pipeline/tune.py` (Ethan-owned; keep it out of frozen
+modules). This is a HARNESS around run_experiment, not a model.
+
+1. **API:** `run_study(base_config, search_space, budget=20, seed=42,
+   storage="sqlite:///logs/optuna/<study_name>.db", study_name=...) ->
+   {best_params, best_value, n_pruned, seconds_saved, trials}`.
+   `search_space` uses the Action schema's shape:
+   `{"lr": ["loguniform", 1e-4, 1e-2], "emb_dim": ["categorical", [8,16,32,64]],
+   "num_leaves": ["int", 31, 255]}` — write one `_suggest(trial, name, spec)`
+   translator.
+2. **Objective:** merge suggested params into `base_config["hparams"]`, run
+   `run_experiment(cfg, fidelity="screen", seed=seed)` (internal folds ONLY
+   — official validation never enters tuning), return mean fold primary.
+   Report per-fold values to the trial (`trial.report(value, step=fold)`)
+   so `MedianPruner` can prune mid-trial; raise `optuna.TrialPruned` when
+   `trial.should_prune()`. An error result → return a sentinel bad value
+   (e.g. 0.0), never raise — a failed trial must not kill the study.
+3. **Sampler/pruner:** `TPESampler(seed=seed)`, `MedianPruner
+   (n_startup_trials=5)`. **One worker** (`n_jobs=1`) — study-level
+   determinism was decided per-experiment; parallel trials reorder pruning.
+4. **Resume:** `optuna.create_study(load_if_exists=True, storage=...)`;
+   acceptance requires kill-and-resume to complete the remaining trials —
+   test with a tiny study interrupted after N trials (drop the study object,
+   recreate, continue).
+5. **Accounting:** count pruned trials and estimate runtime saved (sum of
+   pruned trials' completed-fold time vs full-trial mean) — ≥30% saving is
+   an acceptance criterion; record in the returned dict and ethanprogress.
+6. **A-side hook (coordinate, don't implement):** `execute()` currently
+   ignores `action.search_space` for `type="tune"` — Kaiwen should route
+   tune actions to `pipeline.tune.run_study` and put `best_params` into the
+   node. Note it in the PR body.
+
+### C7 — Blending (`feat/C7-blending`)
+
+**Files:** `pipeline/models/blend.py`, small `train.py` support.
+
+1. **Where parent scores come from (the design decision):** node records
+   don't store score arrays. Use C1's determinism instead — a parent's
+   `(config, fidelity, seed)` reproduces its exact `val_scores`/
+   `test_scores`. Implement a score cache in `train.py` or `blend.py`:
+   key `sha256(canonical_config_json + fidelity + seed)` →
+   `logs/scores/<hash>.npz` (val_scores, val_user_ids, test_scores).
+   `_run_full` writes it (cheap, ~2MB); the blend loads parents by
+   recomputing the hash from the parent node's stored config, falling back
+   to a fresh `run_experiment` if the file is missing. This keeps the
+   frozen result contract untouched.
+2. **Blend model (`model="blend"`):** constructor receives
+   `parents=[node_ids]` and `blend_method`. It does not `fit` on matrices —
+   its `fit` resolves parent score vectors (via store.read(node)["config"]
+   → cache) and its `predict` combines them. All four methods:
+   - `rank_avg` (DEFAULT, hardcoded): scipy-free per-user rank via
+     argsort-of-argsort within user groups, averaged;
+   - `logit_avg`: clip scores to (ε,1−ε) if probabilities, else min-max per
+     user first; average log-odds;
+   - `weighted_rank`: `w·rankA + (1−w)·rankB`, w ∈ {0.1..0.9} selected on
+     INTERNAL FOLDS only;
+   - `rrf`: Σ 1/(k + rank), k=60.
+   Keep every output continuous — never threshold, never vote (trap 10).
+3. **Diagnostic gate:** compute mean per-user Spearman between parents
+   (rank-transform per user, Pearson on ranks). Report it in the result
+   (extra key is fine) and in ethanprogress. >0.95 → refuse ("too similar
+   to gain"); <0.5 → warn ("a parent may be broken").
+4. **Acceptance rule:** the blend is accepted only if it beats BOTH parents
+   on internal folds AND the official metric, by the margin set in
+   `hparams["min_blend_delta"]` (default `MIN_DELTA_FLOOR`), then passes
+   `gate.accept` against the best parent. Only accepted nodes may be
+   parents (`store.best_node` semantics).
+5. **Tests:** two synthetic parents with known score vectors → rank_avg
+   reproduces a hand-computed blend exactly; per-user Spearman matches a
+   scipy cross-check on a fixture; refusal at correlation >0.95; weighted
+   blend's w chosen on folds (spy that official val labels are never read
+   during weight fitting); determinism.
+
+### Expected shape of results (so you can smell breakage)
+
+FM baseline 0.6016. LightGBM pointwise with good temporal features should
+land ~0.60–0.63; lambdarank similar ±; DeepFM near FM unless tuned (the
+Dacrema/Rendle caution — don't chase it past its probe result); a good
+blend adds ~0.002–0.01 over the best parent. Anything above **0.75 is a
+leak until proven otherwise** — that's what the canary and the shuffle
+audit are for. If a number looks too good, run
+`audit_label_shuffle(config)` before believing it.
+
+### Definition of done for Workstream C
+
+All of C1–C7 + C1b/C3b/C4b merged; every model reachable through
+`run_experiment` by name; the five D5 probes runnable; the lift benchmark
+for `gen_user_author_affinity` recorded with an evidence record and a gate
+decision; `ethanprogress.md` carries a measured number for every rung.
