@@ -28,5 +28,8 @@ venv/
 .idea/
 .vscode/
 
+# local workstream notes (progress README remains tracked)
+ethannotes.md
+
 # organiser starter kit — vendored, see pipeline/README_STARTER_KIT.md
 kuairand-starter-kit/*.tar.gz

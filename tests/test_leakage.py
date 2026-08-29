@@ -4,6 +4,8 @@ rejected; legitimate historical aggregates pass."""
 
 from __future__ import annotations
 
+import numpy as np
+
 from pipeline.features import EXCLUDED_SOURCES, FORBIDDEN_SAME_ROW, LABEL
 from tests.conftest import todo
 
@@ -57,6 +59,32 @@ def test_legitimate_historical_aggregate_passes():
     """user_ctr_decayed fits on train_df and maps onto target_df — must pass."""
 
 
-@todo("C1")
-def test_leak_canary_fires_above_threshold():
-    """run_experiment returns error_class="leak_suspected" when primary > 0.75."""
+def _suspicious_tier(config, fidelity, seed):
+    return {
+        "status": "ok",
+        "fidelity": fidelity,
+        "gauc": 0.80,
+        "ndcg": 0.76,
+        "primary": 0.78,
+        "fold_primaries": [0.77, 0.78, 0.79],
+        "segments": {},
+        "val_scores": np.array([0.1, 0.9]),
+        "val_user_ids": np.array([1, 1]),
+        "test_scores": np.array([0.2, 0.8]),
+        "gpu_seconds": 0.0,
+        "peak_rss_mb": 1.0,
+    }
+
+
+def test_leak_canary_fires_above_threshold(monkeypatch):
+    """Removing the canary would promote an implausibly strong result."""
+    import pipeline.train as train
+
+    monkeypatch.setattr(train, "_execute_tier", _suspicious_tier, raising=False)
+
+    result = train.run_experiment({"model": "random"})
+
+    assert result["status"] == "error"
+    assert result["stage"] == "leakage"
+    assert result["error_class"] == "leak_suspected"
+    assert result["primary"] == 0.78
