@@ -8,7 +8,14 @@ Trap 1 (Section 11) lives here: never shuffle, never k-fold, never re-split.
 
 from __future__ import annotations
 
-from pandas import DataFrame  # swap to polars if that is the Day-0 decision
+from typing import TYPE_CHECKING, Any
+
+# polars vs pandas is still open (Section 15, owner: Malvika). Nothing here
+# binds either one: the annotations are strings under `from __future__ import
+# annotations`, so B1 can pick a frame library without this module — or CI —
+# caring. Narrow `DataFrame` to the real type once that call is made.
+if TYPE_CHECKING:
+    DataFrame = Any
 
 # --- Official split boundaries (organiser-fixed, Section 4.3) ---------------
 TRAIN_END = "2022-04-21"
