@@ -8,7 +8,10 @@ Trap 1 (Section 11) lives here: never shuffle, never k-fold, never re-split.
 
 from __future__ import annotations
 
-from pandas import DataFrame  # swap to polars if that is the Day-0 decision
+from pathlib import Path
+
+import pandas as pd
+from pandas import DataFrame # swap to polars if that is the Day-0 decision
 
 # --- Official split boundaries (organiser-fixed, Section 4.3) ---------------
 TRAIN_END = "2022-04-21"
@@ -33,7 +36,7 @@ LOG_FILES = (
     "log_standard_4_08_to_4_21_pure.csv",
     "log_standard_4_22_to_5_08_pure.csv",
 )
-
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # Randomised-exposure log: 1.18M rows dated 2022-04-22 to 2022-05-08, i.e.
 # ENTIRELY after the training cutoff. Usable as an unbiased validation set
 # only. Cannot be used for training-time debiasing (see B8 note in README).
@@ -46,6 +49,13 @@ INTERNAL_FOLDS = [
     ("2022-04-08", "2022-04-19", "2022-04-20", "2022-04-21"),
 ]  # (train_start, train_end, val_start, val_end)
 
+def _assert_split_order(
+    train: DataFrame,
+    val: DataFrame,
+    test: DataFrame,
+) -> None:
+    """Fail if the official splits are not strictly chronological."""
+    assert train["date"].max() < val["date"].min() < test["date"].min()
 
 def load() -> tuple[DataFrame, DataFrame, DataFrame]:
     """Returns (train, val, test) in the organisers' exact row order.
@@ -54,8 +64,57 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
     MUST NOT shuffle, resample, or re-split under any circumstances.
     Row order must match starter-kit data.load() so row_id aligns.
     """
-    raise NotImplementedError("B1")
+    video_path = DATA_DIR / "video_features_basic_pure.csv"
 
+    video_features = pd.read_csv(
+        video_path,
+        usecols=["video_id", "author_id"],
+        dtype=str,
+    )
+
+    vid2author = dict(
+        zip(video_features["video_id"], video_features["author_id"])
+    )
+
+    frames = []
+
+    for filename in LOG_FILES:
+        df = pd.read_csv(DATA_DIR / filename)
+        frames.append(df)
+
+    rows = pd.concat(frames, ignore_index=True)
+
+    rows["author_id"] = (
+        rows["video_id"]
+        .astype(str)
+        .map(vid2author)
+        .fillna("UNK")
+    )
+
+    dates = pd.to_datetime(
+        rows["date"].astype(str),
+        format="%Y%m%d",
+    )
+
+    train = rows.loc[dates <= TRAIN_END].copy()
+
+    val = rows.loc[
+        (dates >= VAL_START) & (dates <= VAL_END)
+    ].copy()
+
+    test = rows.loc[
+        dates >= TEST_START
+    ].copy()
+
+        # B1 safety check: official splits must be strictly chronological.
+    _assert_split_order(train, val, test) 
+
+    # B1 acceptance check: organiser-fixed row counts.
+    assert len(train) == N_TRAIN, f"Expected {N_TRAIN} train rows, got {len(train)}"
+    assert len(val) == N_VAL, f"Expected {N_VAL} val rows, got {len(val)}"
+    assert len(test) == N_TEST, f"Expected {N_TEST} test rows, got {len(test)}"
+
+    return train, val, test
 
 def internal_folds() -> list[tuple[DataFrame, DataFrame]]:
     """Three expanding-window folds inside the training period.
