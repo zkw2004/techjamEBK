@@ -5,9 +5,17 @@ rejected; legitimate historical aggregates pass."""
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
+import pytest
 
-from pipeline.features import EXCLUDED_SOURCES, FORBIDDEN_SAME_ROW, LABEL
-from tests.conftest import todo
+from pipeline.features import (
+    EXCLUDED_SOURCES,
+    FORBIDDEN_SAME_ROW,
+    LABEL,
+    leakage_check,
+    user_ctr,
+    user_ctr_decayed,
+)
 
 
 def test_label_matches_the_shipped_starter_kit():
@@ -39,24 +47,94 @@ def test_monthly_statistics_excluded_by_default():
     assert "item_statistics_monthly" in EXCLUDED_SOURCES
 
 
-@todo("B6")
-def test_feature_reading_target_label_is_rejected():
-    """def bad(train_df, target_df): return target_df["long_view"].values"""
+@pytest.fixture
+def leakage_train_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u2", "u2"],
+            "video_id": ["v1", "v2", "v1", "v3"],
+            "tag": ["10", "20", "10", "30"],
+            "date": [20220409, 20220410, 20220411, 20220412],
+            "hourmin": [900, 1030, 1200, 1530],
+            "long_view": [1, 0, 1, 0],
+        }
+    )
 
 
-@todo("B6")
-def test_feature_reading_forbidden_same_row_column_is_rejected():
-    """def bad(train_df, target_df): return target_df["is_click"].values"""
+@pytest.fixture
+def leakage_target_df() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "user_id": ["u1", "u2", "u3"],
+            "video_id": ["v1", "v2", "v4"],
+            "tag": ["10", "20", "30"],
+            "date": [20220422, 20220423, 20220424],
+            "hourmin": [900, 1030, 1600],
+            "long_view": [0, 1, 0],
+            "is_click": [1, 0, 1],
+        }
+    )
 
 
-@todo("B6")
-def test_excluded_source_is_rejected():
-    """Any feature whose source references item_statistics_monthly."""
+def test_feature_reading_target_label_is_rejected(leakage_train_df, leakage_target_df):
+    def bad(train_df, target_df):
+        del train_df
+        return target_df["long_view"].to_numpy()
+
+    assert leakage_check(bad, leakage_train_df, leakage_target_df) is False
 
 
-@todo("B6")
-def test_legitimate_historical_aggregate_passes():
-    """user_ctr_decayed fits on train_df and maps onto target_df — must pass."""
+def test_feature_reading_forbidden_same_row_column_is_rejected(
+    leakage_train_df, leakage_target_df
+):
+    def bad(train_df, target_df):
+        del train_df
+        return target_df["is_click"].to_numpy()
+
+    assert leakage_check(bad, leakage_train_df, leakage_target_df) is False
+
+
+def test_excluded_source_is_rejected(leakage_train_df, leakage_target_df):
+    def bad(train_df, target_df):
+        del train_df, target_df
+        # A feature reading the monthly aggregate file, whose window may
+        # span the test period (Section 11, trap 3). Never executed here —
+        # the static source scan must reject it before this line would run.
+        return pd.read_parquet("data/item_statistics_monthly.parquet")["rate"].to_numpy()
+
+    assert leakage_check(bad, leakage_train_df, leakage_target_df) is False
+
+
+def test_legitimate_historical_aggregate_passes(leakage_train_df, leakage_target_df):
+    """user_ctr and user_ctr_decayed fit on train_df and map onto target_df —
+    neither reads a forbidden or label column off target_df, so both pass."""
+    assert leakage_check(user_ctr, leakage_train_df, leakage_target_df) is True
+    assert leakage_check(user_ctr_decayed, leakage_train_df, leakage_target_df) is True
+
+
+def test_probe_only_gate_would_miss_a_direct_target_label_read(
+    leakage_train_df, leakage_target_df
+):
+    """Regression for the flaw in Appendix A.2's pseudocode: a feature that
+    reads target_df[LABEL] directly never looks at train_df's label column,
+    so its output is identical whether or not train_df's labels are
+    shuffled. A probe-only gate would read that as "label-independent,
+    therefore safe" and never reach the static source check. The static
+    check must run unconditionally, first — which is exactly what makes
+    `leakage_check` still reject this."""
+
+    def bad(train_df, target_df):
+        del train_df
+        return target_df["long_view"].to_numpy()
+
+    shuffled_train = leakage_train_df.assign(
+        long_view=leakage_train_df["long_view"].sample(frac=1, random_state=0).to_numpy()
+    )
+    assert np.array_equal(
+        bad(leakage_train_df, leakage_target_df),
+        bad(shuffled_train, leakage_target_df),
+    )
+    assert leakage_check(bad, leakage_train_df, leakage_target_df) is False
 
 
 def _suspicious_tier(config, fidelity, seed):

@@ -9,6 +9,7 @@ That shape makes leakage the exception rather than the default.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 
 import numpy as np
@@ -499,15 +500,59 @@ def user_ctr_decayed(train_df, target_df) -> np.ndarray:
     return target_df["user_id"].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
 
 
-def leakage_check(fn: Callable, train_df, target_df) -> bool:
-    """Static + probe leakage guard. See Appendix A.2. (B6)
+def _reads_target_column(src: str, column: str) -> bool:
+    """True if `src` indexes target_df by `column`, either quote style."""
+    return f'target_df["{column}"]' in src or f"target_df['{column}']" in src
 
-    1. Label-independence probe: shuffle train labels; if output is
-       unchanged the feature is label-free (safe) or reading labels off
-       target_df (unsafe) — the static check disambiguates.
-    2. Static source check: no target_df["long_view"], no FORBIDDEN_SAME_ROW
-       column read off target_df, no EXCLUDED_SOURCES.
+
+def leakage_check(fn: Callable, train_df, target_df) -> bool:
+    """Static + dynamic leakage guard. Returns True iff `fn` is safe. (B6)
+
+    CORRECTED vs Appendix A.2's pseudocode. There, the label-independence
+    probe runs first and short-circuits to `return True` whenever shuffling
+    train_df's label leaves the output unchanged — with the static check
+    reached only on the other branch. But a feature that reads
+    target_df[LABEL] directly never looks at train_df's label column either,
+    so shuffling it produces the identical "unchanged" signal and the
+    leak sails through the very probe meant to disambiguate it. This is
+    exactly the class of trap Section 11 warns about: it looks like a
+    reasonable check and silently passes the thing it exists to catch.
+
+    Two independent layers, both must pass:
+
+    1. Static source check (authoritative). `fn`'s source must not index
+       target_df by the label, a FORBIDDEN_SAME_ROW column, or reference an
+       EXCLUDED_SOURCES name. Runs unconditionally, first, before `fn` is
+       ever executed on real data.
+    2. Dynamic corruption probe. With the label and every FORBIDDEN_SAME_ROW
+       column on target_df replaced with NaN, `fn`'s output must not change.
+       This catches indirection the source scan cannot see — a column name
+       held in a variable, `.loc` access, a helper called under another
+       name — exactly the kind of code Tier 2 (agent-generated features,
+       Section 7.3) might produce. Legitimate historical aggregates never
+       read those target-row columns at all, so they are untouched by the
+       corruption and pass.
 
     The third layer is the >0.75 primary canary inside run_experiment (C1).
     """
-    raise NotImplementedError("B6")
+    if train_df.empty or target_df.empty:
+        raise ValueError("leakage_check requires non-empty train_df and target_df")
+
+    src = inspect.getsource(fn)
+    if _reads_target_column(src, LABEL):
+        return False
+    for column in FORBIDDEN_SAME_ROW:
+        if _reads_target_column(src, column):
+            return False
+    for source_name in EXCLUDED_SOURCES:
+        if source_name in src:
+            return False
+
+    baseline = np.asarray(fn(train_df, target_df))
+    corrupted_target = target_df.copy()
+    for column in (LABEL, *FORBIDDEN_SAME_ROW):
+        if column in corrupted_target.columns:
+            corrupted_target[column] = np.nan
+    corrupted = np.asarray(fn(train_df, corrupted_target))
+
+    return bool(np.array_equal(baseline, corrupted, equal_nan=True))
