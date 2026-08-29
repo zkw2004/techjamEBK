@@ -4,7 +4,6 @@ touches 22 April or later; expanding window verified."""
 from __future__ import annotations
 
 from pipeline.data import INTERNAL_FOLDS, VAL_START
-
 from tests.conftest import todo
 
 

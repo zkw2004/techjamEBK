@@ -1,21 +1,36 @@
 # Secrets in git history are an unrecoverable scored failure (Section 9.1).
+#
+# Note the excludes on end-of-file-fixer and trailing-whitespace. evaluate.py
+# and submit.py are the scoring ground truth and are hashed into every run
+# manifest (Section 8.3), so one byte rewritten by a formatting hook would
+# fail preflight and invalidate the run. The exclude is scoped to those two
+# mutating hooks only — detect-secrets and detect-private-key still scan every
+# path, since they are read-only.
+
 repos:
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
       - id: detect-secrets
-        args: ["--baseline", ".secrets.baseline"]
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: check-added-large-files
         args: ["--maxkb=2000"]
-      - id: end-of-file-fixer
-      - id: trailing-whitespace
       - id: check-merge-conflict
       - id: detect-private-key
+      - id: end-of-file-fixer
+        exclude: '^(kuairand-starter-kit/|pipeline/(evaluate|submit)\.py$)'
+      - id: trailing-whitespace
+        exclude: '^(kuairand-starter-kit/|pipeline/(evaluate|submit)\.py$)'
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    # Keep this rev and the pinned `ruff==` in pyproject's dev deps in step.
+    # When they drift, CI enforces a different rule set than local hooks and
+    # a clean local run fails on the runner.
+    rev: v0.16.5
     hooks:
       - id: ruff
         args: ["--fix"]
+        # ruff reads its own extend-exclude from pyproject.toml.

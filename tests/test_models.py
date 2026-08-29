@@ -7,7 +7,6 @@ C2 IS A HARD GATE — if random and popularity do not reproduce 0.4753 and
 from __future__ import annotations
 
 from pipeline.models import MODEL_REGISTRY
-
 from tests.conftest import todo
 
 EXPECTED_MODELS = {"random", "popularity", "fm", "lgbm", "deepfm", "deepfm_mtl", "blend"}

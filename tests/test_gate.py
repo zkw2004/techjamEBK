@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 from agent.gate import BASELINE_SEED_STD, MIN_DELTA_FLOOR
-
 from tests.conftest import todo
 
 

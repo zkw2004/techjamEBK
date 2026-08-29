@@ -61,7 +61,12 @@ data nor `.env` is ever committed.
 
 ```bash
 pytest                           # green; unbuilt tasks show as skips
+ruff check .
 ```
+
+CI runs both on every PR to `main`, plus `pre-commit run --all-files` as a
+secrets gate. Neither job needs the dataset — every test runs against fixtures
+and tmp dirs, so CI stays in seconds.
 
 ## Layout
 

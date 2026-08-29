@@ -5,7 +5,6 @@ rejected; legitimate historical aggregates pass."""
 from __future__ import annotations
 
 from pipeline.features import EXCLUDED_SOURCES, FORBIDDEN_SAME_ROW, LABEL
-
 from tests.conftest import todo
 
 
