@@ -137,3 +137,82 @@ def test_action_without_executable_config_is_a_schema_error():
 
     assert node["status"] == "error"
     assert node["errors"][0]["error_class"] == "schema"
+
+
+# --- C4b wiring: type="code", family="feature" routes through codegen --------
+
+
+def _feature_fixture_frames():
+    import numpy as np
+    import pandas as pd
+
+    def frame(rows, dates, offset=0):
+        index = np.arange(rows) + offset
+        return pd.DataFrame(
+            {
+                "date": np.asarray(dates)[index % len(dates)],
+                "user_id": index % 6,
+                "video_id": index % 40,
+                "author_id": index % 5,
+                "tab": index % 2,
+                "duration_ms": 1_000 + (index % 4) * 500,
+                "long_view": (index % 5 == 0).astype(int),
+            }
+        )
+
+    return (
+        frame(1_100, list(range(20220408, 20220422))),
+        frame(200, [20220422, 20220423], offset=4_000),
+        frame(200, [20220429, 20220430], offset=8_000),
+    )
+
+
+@pytest.mark.skipif(
+    "fork" not in E.mp.get_all_start_methods(),
+    reason="fixture data is inherited by fork-based workers only",
+)
+def test_feature_code_action_registers_and_uses_the_generated_feature(monkeypatch):
+    import pipeline.train as train
+
+    monkeypatch.setattr(train, "_load_data", _feature_fixture_frames, raising=False)
+    action = _action(
+        type="code",
+        family="feature",
+        code=(
+            "def constant_feature(train_df, target_df):\n"
+            "    import numpy as np\n"
+            "    return np.zeros(len(target_df))\n"
+        ),
+    )
+
+    node = E.execute(action, fidelity="smoke", timeout_s=60)
+
+    assert node["status"] == "ok", node.get("errors")
+    # registration is contained in the worker: nothing leaks into this process
+    from pipeline.features import FEATURES
+
+    assert "gen_constant_feature" not in FEATURES
+
+
+@pytest.mark.skipif(
+    "fork" not in E.mp.get_all_start_methods(),
+    reason="fixture data is inherited by fork-based workers only",
+)
+def test_leaky_feature_code_action_is_classified_leak_suspected(monkeypatch):
+    """B6 rejects the read before training; A5 will quarantine, never repair."""
+    import pipeline.train as train
+
+    monkeypatch.setattr(train, "_load_data", _feature_fixture_frames, raising=False)
+    action = _action(
+        type="code",
+        family="feature",
+        code=(
+            "def oracle(train_df, target_df):\n"
+            "    return target_df[\"long_view\"].to_numpy(dtype=float)\n"
+        ),
+    )
+
+    node = E.execute(action, fidelity="smoke", timeout_s=60)
+
+    assert node["status"] == "error"
+    assert node["errors"][0]["error_class"] == "leak_suspected"

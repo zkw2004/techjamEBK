@@ -37,6 +37,20 @@ class FirstColumnModel(FullSeedModel):
         return np.asarray(X[:, 0], dtype=float)
 
 
+class FoldEpochModel(FullSeedModel):
+    def __init__(self, seed=42, max_epochs=40, **hparams):
+        super().__init__(seed=seed)
+        self.max_epochs = max_epochs
+        self.best_epoch = None
+
+    def fit(self, X_train, y_train, X_val, y_val, groups=None):
+        if X_val is not None:
+            self.best_epoch = self.seed
+
+    def predict(self, X):
+        return np.full(len(X), float(self.max_epochs))
+
+
 def _frame(rows: int, offset: int = 0) -> dict[str, np.ndarray]:
     index = np.arange(rows) + offset
     return {
@@ -157,6 +171,15 @@ def test_full_tier_is_deterministic_without_replacing_tier_execution(monkeypatch
     np.testing.assert_array_equal(first["test_scores"], second["test_scores"])
 
 
+def test_full_refit_uses_median_best_epoch_selected_on_internal_folds(monkeypatch):
+    train = _install_fixture_backend(monkeypatch, FoldEpochModel)
+
+    result = train.run_experiment({"model": "fm"}, fidelity="full", seed=9)
+
+    assert result["status"] == "ok"
+    np.testing.assert_array_equal(result["val_scores"], np.full(6, 10.0))
+
+
 def test_raw_label_cannot_be_selected_as_a_feature(monkeypatch):
     train = _install_fixture_backend(monkeypatch, FullSeedModel)
 
@@ -182,7 +205,9 @@ def test_registered_feature_must_pass_leakage_guard(monkeypatch):
     )
 
     assert result["status"] == "error"
-    assert result["error_class"] == "schema"
+    # leak_suspected, not schema: A5 gives schema errors a repair attempt,
+    # and a leaky feature must be quarantined, never repaired into passing.
+    assert result["error_class"] == "leak_suspected"
 
 
 def test_runner_uses_b_workflow_label_with_pandas_frames(monkeypatch):
@@ -219,6 +244,17 @@ def test_runner_executes_b3_registered_feature_on_pandas_frames(monkeypatch):
 
     assert result["status"] == "ok"
     np.testing.assert_array_equal(result["val_scores"], [0, 1, 2, 3, 4, 5])
+
+
+def test_matrix_derives_duration_bucket_from_training_quantiles():
+    import pipeline.train as train
+
+    training = pd.DataFrame({"duration_ms": np.arange(10, 110, 10)})
+    target = pd.DataFrame({"duration_ms": [10, 25, 100]})
+
+    matrix = train._matrix(training, target, ["dur_bucket"])
+
+    np.testing.assert_array_equal(matrix[:, 0], [0, 1, 9])
 
 
 def test_runner_uses_b3_public_feature_resolver(monkeypatch):

@@ -140,11 +140,30 @@ def _code_child(
     fidelity: str,
     seed: int,
     timeout_s: int | float,
+    family: str = "model",
 ) -> None:
-    """Run generated code and C1 in a child; send only a serialisable result."""
+    """Run generated code and C1 in a child; send only a serialisable result.
+
+    family="feature" routes through the C4b codegen path: the emitted source
+    is loaded against the frozen Section 8.4 signature, registered under its
+    gen_-prefixed name (in this child only — registration dies with the
+    process), and appended to the config's feature list so the code actually
+    participates in the run. C1's _matrix then applies the B6 leakage guard
+    to it before any training, via the attached __leak_source__.
+    """
     try:
-        namespace = {"__name__": "generated_experiment"}
-        exec(compile(code, "<generated-experiment>", "exec"), namespace)  # noqa: S102
+        if family == "feature":
+            from pipeline import codegen
+
+            fn = codegen.load_feature(code)
+            full_name = codegen.register_generated(fn.__name__, fn)
+            features = list(config.get("features", []))
+            if full_name not in features:
+                features.append(full_name)
+            config = {**config, "features": features}
+        else:
+            namespace = {"__name__": "generated_experiment"}
+            exec(compile(code, "<generated-experiment>", "exec"), namespace)  # noqa: S102
         result = _run_experiment(config, fidelity, seed, timeout_s)
         send_conn.send(("result", result))
     except BaseException as exc:
@@ -173,7 +192,10 @@ def _run_code_action(
         # Deliberately not daemon=True: C1 creates its own worker process.
         process = context.Process(
             target=_code_child,
-            args=(send_conn, action.code or "", config, fidelity, action.config.seed, timeout_s),
+            args=(
+                send_conn, action.code or "", config, fidelity,
+                action.config.seed, timeout_s, action.family,
+            ),
         )
         process.start()
         send_conn.close()
