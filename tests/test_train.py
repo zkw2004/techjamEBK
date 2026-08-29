@@ -205,7 +205,9 @@ def test_registered_feature_must_pass_leakage_guard(monkeypatch):
     )
 
     assert result["status"] == "error"
-    assert result["error_class"] == "schema"
+    # leak_suspected, not schema: A5 gives schema errors a repair attempt,
+    # and a leaky feature must be quarantined, never repaired into passing.
+    assert result["error_class"] == "leak_suspected"
 
 
 def test_runner_uses_b_workflow_label_with_pandas_frames(monkeypatch):

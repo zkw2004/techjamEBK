@@ -47,6 +47,15 @@ class LeakSuspectedError(RuntimeError):
         )
 
 
+class FeatureLeakError(ValueError):
+    """A feature failed the pre-training leakage guard (B6).
+
+    Classified as `leak_suspected`, not `schema`: A5's recovery policy gives
+    schema errors a repair attempt, and a leak must be quarantined rather
+    than regenerated until it slips past the guard.
+    """
+
+
 def _error_record(
     stage: str,
     error_class: str,
@@ -65,7 +74,7 @@ def _error_record(
 
 
 def _classify_exception(exc: BaseException) -> str:
-    if isinstance(exc, LeakSuspectedError):
+    if isinstance(exc, (LeakSuspectedError, FeatureLeakError)):
         return "leak_suspected"
     if isinstance(exc, SyntaxError):
         return "syntax"
@@ -179,9 +188,9 @@ def _matrix(train_frame, target_frame, feature_names: list[str]) -> np.ndarray:
             try:
                 safe = leakage_check(builder, train_frame, target_frame)
             except (AssertionError, ValueError) as exc:
-                raise ValueError(f"feature {name!r} failed leakage checks") from exc
+                raise FeatureLeakError(f"feature {name!r} failed leakage checks") from exc
             if not safe:
-                raise ValueError(f"feature {name!r} failed leakage checks")
+                raise FeatureLeakError(f"feature {name!r} failed leakage checks")
             values = builder(train_frame, target_frame)
         values = np.asarray(values)
         if values.ndim != 1 or len(values) != _row_count(target_frame):
