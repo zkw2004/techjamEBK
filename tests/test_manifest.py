@@ -4,7 +4,6 @@ preflight closed; every node carries the manifest hash."""
 from __future__ import annotations
 
 from agent.manifest import BASELINE_SEED_STD, BASELINE_VALIDATION, CONVERGENCE, SUBMISSION
-
 from tests.conftest import todo
 
 
@@ -31,6 +30,5 @@ def test_metric_profile_is_read_from_the_shipped_evaluator():
     """Never from prose — the brief contradicts itself (Section 4.8)."""
 
 
-@todo("A2")
-def test_every_node_carries_the_manifest_hash():
-    pass
+# test_every_node_carries_the_manifest_hash lives in test_store.py — the
+# stamping is the store's job (A2); D2 only supplies the hash.

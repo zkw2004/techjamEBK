@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pandas as pd
-from pandas import DataFrame # swap to polars if that is the Day-0 decision
+from pandas import DataFrame  # swap to polars if that is the Day-0 decision
 
 # --- Official split boundaries (organiser-fixed, Section 4.3) ---------------
 TRAIN_END = "2022-04-21"
@@ -36,6 +36,7 @@ LOG_FILES = (
     "log_standard_4_08_to_4_21_pure.csv",
     "log_standard_4_22_to_5_08_pure.csv",
 )
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 # Randomised-exposure log: 1.18M rows dated 2022-04-22 to 2022-05-08, i.e.
 # ENTIRELY after the training cutoff. Usable as an unbiased validation set
@@ -106,8 +107,8 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
         dates >= TEST_START
     ].copy()
 
-        # B1 safety check: official splits must be strictly chronological.
-    _assert_split_order(train, val, test) 
+    # B1 safety check: official splits must be strictly chronological.
+    _assert_split_order(train, val, test)
 
     # B1 acceptance check: organiser-fixed row counts.
     assert len(train) == N_TRAIN, f"Expected {N_TRAIN} train rows, got {len(train)}"

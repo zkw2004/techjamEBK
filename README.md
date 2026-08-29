@@ -50,18 +50,34 @@ rather than after.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"          # or: uv sync
-pre-commit install
+make setup                       # deps + pre-commit hooks
+make data                        # fetch + checksum KuaiRand-Pure (45MB)
 cp .env.example .env             # add ANTHROPIC_API_KEY
+make check                       # what CI runs
 ```
 
-Then install the two immutable starter-kit files and the data — see
-[pipeline/README_STARTER_KIT.md](pipeline/README_STARTER_KIT.md). Neither the
-data nor `.env` is ever committed.
+`make data` is idempotent, so re-running it is a no-op once the dataset is
+there. It verifies the archive against the SHA-256 in [DAY0.md](DAY0.md) and
+fails loudly on a mismatch — every recorded baseline assumes that archive.
+
+**The dataset is deliberately not committed.** It is 194MB extracted with an
+83MB largest file, and a blob that size is permanent in git history: removing
+it later needs a rewrite that breaks everyone's clone. It is one public file
+from a stable Zenodo DOI, so fetching beats vendoring. `.env` is never
+committed either.
+
+`pipeline/evaluate.py` and `submit.py` are vendored from the starter kit and
+must stay byte-identical — see
+[pipeline/README_STARTER_KIT.md](pipeline/README_STARTER_KIT.md).
 
 ```bash
 pytest                           # green; unbuilt tasks show as skips
+ruff check .
 ```
+
+CI runs both on every PR to `main`, plus `pre-commit run --all-files` as a
+secrets gate. Neither job needs the dataset — every test runs against fixtures
+and tmp dirs, so CI stays in seconds.
 
 ## Layout
 

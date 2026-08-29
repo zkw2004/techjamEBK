@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 from pipeline.data import N_TEST, N_TRAIN, N_VAL
-
 from tests.conftest import todo
 
 
