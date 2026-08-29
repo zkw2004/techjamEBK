@@ -69,14 +69,32 @@ INITIAL_RATE = 0.5
 
 
 def _parse_dates(values: pd.Series) -> pd.Series:
-    """Parse integer, float-promoted, or ISO-formatted calendar dates."""
+    """Parse integer, float-promoted, ISO, or pandas calendar dates."""
+    if isinstance(values.dtype, pd.DatetimeTZDtype) or pd.api.types.is_datetime64_any_dtype(
+        values.dtype
+    ):
+        return pd.to_datetime(values, errors="coerce")
+
     date_strings = (
         values.astype("string")
         .str.strip()
         .str.replace("-", "", regex=False)
         .str.replace(r"\.0$", "", regex=True)
     )
-    return pd.to_datetime(date_strings, format="%Y%m%d", errors="coerce")
+    parsed = pd.to_datetime(date_strings, format="%Y%m%d", errors="coerce")
+
+    # Timestamp strings with a time component are not YYYYMMDD, but are still
+    # valid inputs. Never apply this fallback to numeric calendar values:
+    # pandas would otherwise interpret an invalid 20220431 as epoch nanoseconds.
+    numeric = pd.to_numeric(values, errors="coerce")
+    fallback_mask = parsed.isna() & values.notna() & numeric.isna()
+    if fallback_mask.any():
+        parsed.loc[fallback_mask] = pd.to_datetime(
+            values.loc[fallback_mask],
+            format="mixed",
+            errors="coerce",
+        )
+    return parsed
 
 
 def _assert_historical_cutoff(train_df, target_df) -> None:
@@ -372,18 +390,113 @@ def eb_smooth(clicks, impressions, global_rate, alpha: float = 20.0):
     """Empirical-Bayes shrinkage toward the global rate.
 
     Sparse groups (small n) collapse to global_rate; dense groups keep
-    their own rate. Fit alpha on internal folds only. (B5)
+    their own rate. ``clicks`` and ``impressions`` may be fractional after
+    time weighting. Callers must select alpha on internal folds only. (B5)
     """
-    raise NotImplementedError("B5")
+    try:
+        alpha = float(alpha)
+        global_rate = float(global_rate)
+        click_values = np.asarray(clicks, dtype=np.float64)
+        impression_values = np.asarray(impressions, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("EB inputs must be numeric") from exc
+
+    if not np.isfinite(alpha) or alpha <= 0:
+        raise ValueError("alpha must be finite and greater than zero")
+    if not np.isfinite(global_rate) or not 0 <= global_rate <= 1:
+        raise ValueError("global_rate must be finite and between zero and one")
+    if isinstance(clicks, pd.Series) and isinstance(impressions, pd.Series):
+        if not clicks.index.equals(impressions.index):
+            raise ValueError("click and impression Series must have identical indexes")
+    if click_values.ndim and impression_values.ndim:
+        if click_values.shape != impression_values.shape:
+            raise ValueError("clicks and impressions must have matching shapes")
+
+    try:
+        click_values, impression_values = np.broadcast_arrays(click_values, impression_values)
+    except ValueError as exc:
+        raise ValueError("clicks and impressions are not broadcast-compatible") from exc
+
+    if not np.isfinite(click_values).all() or not np.isfinite(impression_values).all():
+        raise ValueError("clicks and impressions must be finite")
+    if (click_values < 0).any() or (impression_values < 0).any():
+        raise ValueError("clicks and impressions must be non-negative")
+    if (click_values > impression_values).any():
+        raise ValueError("clicks cannot exceed impressions")
+
+    result = (click_values + alpha * global_rate) / (impression_values + alpha)
+    if isinstance(clicks, pd.Series):
+        return pd.Series(result, index=clicks.index, name=clicks.name)
+    if isinstance(impressions, pd.Series):
+        return pd.Series(result, index=impressions.index, name=impressions.name)
+    if result.ndim == 0:
+        return float(result)
+    return result
 
 
 def decay_weights(dates, cutoff, half_life_days: float = 7.0) -> np.ndarray:
     """Exponential recency weights: 0.5 ** (age_days / half_life_days).
 
     Recent behaviour predicts the near future better, and the test window
-    sits 8-17 days out. Half-life fitted on internal folds only. (B5)
+    sits 8-17 days out. Callers must select the half-life on internal folds
+    only. Dates after the fitting cutoff are rejected. (B5)
     """
-    raise NotImplementedError("B5")
+    try:
+        half_life_days = float(half_life_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("half_life_days must be numeric") from exc
+    if not np.isfinite(half_life_days) or half_life_days <= 0:
+        raise ValueError("half_life_days must be finite and greater than zero")
+
+    if isinstance(dates, pd.Series):
+        date_values = dates.reset_index(drop=True)
+    elif np.isscalar(dates):
+        date_values = pd.Series([dates])
+    else:
+        date_values = pd.Series(dates)
+
+    parsed_dates = _parse_dates(date_values)
+    parsed_cutoff = _parse_dates(pd.Series([cutoff])).iloc[0]
+    if pd.isna(parsed_cutoff):
+        raise ValueError("cutoff must be a valid calendar date")
+    if parsed_dates.isna().any():
+        raise ValueError("dates must contain only valid calendar dates")
+
+    age_days = (parsed_cutoff - parsed_dates).dt.total_seconds() / 86_400.0
+    if (age_days < 0).any():
+        raise ValueError("dates cannot be later than cutoff")
+    return np.power(0.5, age_days.to_numpy(dtype=np.float64) / half_life_days)
+
+
+@feature("user_ctr_decayed")
+def user_ctr_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical long-view rate per user.
+
+    The train-wide maximum date is the decay cutoff. The global prior is the
+    unweighted training label mean, matching Appendix A.1. Alpha and half-life
+    use helper defaults here; alternative values must be screened on B2's
+    internal folds before a caller adopts them.
+    """
+    _assert_historical_cutoff(train_df, target_df)
+    labels = _numeric_labels(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("user_ctr_decayed requires valid training dates")
+
+    weights = decay_weights(dates, dates.max())
+    fitting_rows = pd.DataFrame(
+        {
+            "user_id": train_df["user_id"].to_numpy(),
+            "_weighted_positive": weights * labels.to_numpy(),
+            "_weight": weights,
+        }
+    )
+    grouped = fitting_rows.groupby("user_id", sort=False)
+    weighted_positives = grouped["_weighted_positive"].sum()
+    effective_impressions = grouped["_weight"].sum()
+    global_rate = float(labels.mean())
+    rates = eb_smooth(weighted_positives, effective_impressions, global_rate)
+    return target_df["user_id"].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
 
 
 def leakage_check(fn: Callable, train_df, target_df) -> bool:
