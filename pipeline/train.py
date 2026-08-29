@@ -7,11 +7,475 @@ MUST NOT raise. MUST enforce timeout_s. MUST be deterministic given seed.
 
 from __future__ import annotations
 
+import multiprocessing as mp
+import os
+import random
+import resource
+import signal
+import sys
+import time
+import traceback as traceback_module
+from collections.abc import Mapping
+from numbers import Real
+
+import numpy as np
+from pydantic import ValidationError
+
+from agent.schema import Config
+
 FIDELITIES = ("smoke", "screen", "full", "confirm")
 
 ERROR_CLASSES = ("syntax", "schema", "timeout", "oom", "transient", "leak_suspected")
 
 LEAK_CANARY_PRIMARY = 0.75  # Section 3; realistic ceiling is nowhere near this
+PROCESS_STOP_GRACE_S = 0.1
+
+SCREEN_BUDGET_CAPS = {
+    "max_epochs": 3,
+    "epochs": 3,
+    "n_estimators": 200,
+    "num_boost_round": 200,
+    "num_trials": 5,
+}
+
+
+class LeakSuspectedError(RuntimeError):
+    def __init__(self, primary: float):
+        self.primary = primary
+        super().__init__(
+            f"primary {primary:.6f} exceeds canary {LEAK_CANARY_PRIMARY:.2f}"
+        )
+
+
+def _error_record(
+    stage: str,
+    error_class: str,
+    started: float,
+    traceback_text: str,
+    **extra,
+) -> dict:
+    return {
+        "status": "error",
+        "stage": stage,
+        "error_class": error_class,
+        "traceback": traceback_text,
+        "seconds": time.monotonic() - started,
+        **extra,
+    }
+
+
+def _classify_exception(exc: BaseException) -> str:
+    if isinstance(exc, LeakSuspectedError):
+        return "leak_suspected"
+    if isinstance(exc, SyntaxError):
+        return "syntax"
+    if isinstance(exc, MemoryError):
+        return "oom"
+    if isinstance(exc, (KeyError, TypeError, ValueError, ValidationError)):
+        return "schema"
+    return "transient"
+
+
+def _execute_tier(config: dict, fidelity: str, seed: int) -> dict:
+    """Execute one fidelity tier inside the isolated child process."""
+    _seed_everything(seed)
+    if fidelity == "smoke":
+        return _run_smoke(config, seed)
+    if fidelity == "screen":
+        return _run_screen(config, seed)
+    if fidelity == "full":
+        return _run_full(config, seed)
+    if fidelity == "confirm":
+        return _run_confirm(config, seed)
+    raise ValueError(f"unsupported fidelity {fidelity!r}")
+
+
+def _seed_everything(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    try:
+        import torch
+    except ImportError:
+        return
+    torch.manual_seed(seed)
+    torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def _load_data():
+    from pipeline.data import load
+
+    return load()
+
+
+def _load_folds():
+    from pipeline.data import internal_folds
+
+    return internal_folds()
+
+
+def _get_model_class(name: str):
+    from pipeline.models import get
+
+    return get(name)
+
+
+def _head(frame, rows: int):
+    if isinstance(frame, Mapping):
+        return {name: np.asarray(values)[:rows] for name, values in frame.items()}
+    if hasattr(frame, "head"):
+        return frame.head(rows)
+    return frame[:rows]
+
+
+def _row_count(frame) -> int:
+    if not isinstance(frame, Mapping):
+        return len(frame)
+    lengths = {len(values) for values in frame.values()}
+    if len(lengths) != 1:
+        raise ValueError("frame columns must have equal lengths")
+    return lengths.pop() if lengths else 0
+
+
+def _column(frame, name: str) -> np.ndarray:
+    try:
+        values = frame[name]
+    except (KeyError, TypeError) as exc:
+        raise KeyError(f"required column {name!r} is unavailable") from exc
+    if hasattr(values, "to_numpy"):
+        values = values.to_numpy()
+    return np.asarray(values)
+
+
+def _has_column(frame, name: str) -> bool:
+    if isinstance(frame, Mapping):
+        return name in frame
+    columns = getattr(frame, "columns", ())
+    return name in columns
+
+
+def _matrix(train_frame, target_frame, feature_names: list[str]) -> np.ndarray:
+    from pipeline.data import FIELDS
+    from pipeline.features import get as get_feature
+    from pipeline.features import leakage_check
+
+    columns = []
+    for name in feature_names:
+        if name in FIELDS and _has_column(target_frame, name):
+            values = _column(target_frame, name)
+        else:
+            builder = get_feature(name)
+            try:
+                safe = leakage_check(builder, train_frame, target_frame)
+            except (AssertionError, ValueError) as exc:
+                raise ValueError(f"feature {name!r} failed leakage checks") from exc
+            if not safe:
+                raise ValueError(f"feature {name!r} failed leakage checks")
+            values = builder(train_frame, target_frame)
+        values = np.asarray(values)
+        if values.ndim != 1 or len(values) != _row_count(target_frame):
+            raise ValueError(f"feature {name!r} must return one value per target row")
+        columns.append(values)
+    if not columns:
+        return np.empty((_row_count(target_frame), 0), dtype=float)
+    return np.column_stack(columns)
+
+
+def _new_model(config: dict, seed: int):
+    model_class = _get_model_class(config["model"])
+    kwargs = dict(config["hparams"])
+    kwargs.update(
+        seed=seed,
+        loss=config["loss"],
+        parents=config["parents"],
+        blend_method=config["blend_method"],
+        negative_sampling=config["negative_sampling"],
+    )
+    return model_class(**kwargs)
+
+
+def _fit_and_predict(
+    config: dict,
+    train_frame,
+    validation_frame,
+    prediction_frames: list,
+    seed: int,
+) -> list[np.ndarray]:
+    from pipeline.data import LABEL
+
+    features = config["features"]
+    model = _new_model(config, seed)
+    train_matrix = _matrix(train_frame, train_frame, features)
+    train_labels = _column(train_frame, LABEL)
+
+    if validation_frame is None:
+        validation_matrix = validation_labels = None
+    else:
+        validation_matrix = _matrix(train_frame, validation_frame, features)
+        validation_labels = _column(validation_frame, LABEL)
+
+    model.fit(train_matrix, train_labels, validation_matrix, validation_labels)
+    outputs = []
+    for frame in prediction_frames:
+        scores = np.asarray(model.predict(_matrix(train_frame, frame, features)), dtype=float)
+        if scores.ndim != 1 or len(scores) != _row_count(frame):
+            raise ValueError("model predict() must return one score per row")
+        if not np.isfinite(scores).all():
+            raise ValueError("model predict() returned non-finite scores")
+        outputs.append(scores)
+    return outputs
+
+
+def _evaluate(frame, scores: np.ndarray) -> dict[str, float]:
+    from pipeline.data import LABEL
+    from pipeline.evaluate import evaluate
+
+    raw = evaluate(_column(frame, "user_id"), _column(frame, LABEL), scores)
+    return {
+        "gauc": float(raw["GAUC"]),
+        "ndcg": float(raw["nDCG@5"]),
+        "primary": float(raw["primary"]),
+    }
+
+
+def _peak_rss_mb() -> float:
+    rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return rss / (1024 * 1024 if sys.platform == "darwin" else 1024)
+
+
+def _success(fidelity: str, **values) -> dict:
+    return {
+        "status": "ok",
+        "fidelity": fidelity,
+        "gauc": None,
+        "ndcg": None,
+        "primary": None,
+        "fold_primaries": [],
+        "segments": {},
+        "val_scores": np.array([], dtype=float),
+        "val_user_ids": np.array([], dtype=np.int64),
+        "test_scores": np.array([], dtype=float),
+        "gpu_seconds": 0.0,
+        "peak_rss_mb": _peak_rss_mb(),
+        **values,
+    }
+
+
+def _run_smoke(config: dict, seed: int) -> dict:
+    train_frame, validation_frame, test_frame = _load_data()
+    train_sample = _head(train_frame, 1_000)
+    validation_sample = _head(validation_frame, 1_000)
+    test_sample = _head(test_frame, 1_000)
+    validation_scores, test_scores = _fit_and_predict(
+        config,
+        train_sample,
+        validation_sample,
+        [validation_sample, test_sample],
+        seed,
+    )
+    return _success(
+        "smoke",
+        val_scores=validation_scores,
+        val_user_ids=_column(validation_sample, "user_id"),
+        test_scores=test_scores,
+    )
+
+
+def _score_folds(config: dict, seed: int) -> tuple[list[dict[str, float]], np.ndarray, np.ndarray]:
+    metrics = []
+    all_scores = []
+    all_user_ids = []
+    folds = _load_folds()
+    if len(folds) != 3:
+        raise ValueError(f"screen requires exactly three internal folds, got {len(folds)}")
+    for index, (fold_train, fold_validation) in enumerate(folds):
+        (scores,) = _fit_and_predict(
+            config,
+            fold_train,
+            fold_validation,
+            [fold_validation],
+            seed + index,
+        )
+        metrics.append(_evaluate(fold_validation, scores))
+        all_scores.append(scores)
+        all_user_ids.append(_column(fold_validation, "user_id"))
+    return metrics, np.concatenate(all_scores), np.concatenate(all_user_ids)
+
+
+def _mean_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
+    return {
+        name: float(np.mean([item[name] for item in metrics]))
+        for name in ("gauc", "ndcg", "primary")
+    }
+
+
+def _screen_config(config: dict) -> dict:
+    reduced = {**config, "hparams": dict(config["hparams"])}
+    for name, cap in SCREEN_BUDGET_CAPS.items():
+        current = reduced["hparams"].get(name, cap)
+        if isinstance(current, bool) or not isinstance(current, Real) or current <= 0:
+            raise ValueError(f"{name} must be a positive number")
+        reduced["hparams"][name] = min(current, cap)
+    return reduced
+
+
+def _run_screen(config: dict, seed: int) -> dict:
+    fold_metrics, scores, user_ids = _score_folds(_screen_config(config), seed)
+    return _success(
+        "screen",
+        **_mean_metrics(fold_metrics),
+        fold_primaries=[item["primary"] for item in fold_metrics],
+        val_scores=scores,
+        val_user_ids=user_ids,
+    )
+
+
+def _run_full(config: dict, seed: int) -> dict:
+    fold_metrics, _, _ = _score_folds(config, seed)
+    train_frame, validation_frame, test_frame = _load_data()
+    validation_scores, test_scores = _fit_and_predict(
+        config,
+        train_frame,
+        None,
+        [validation_frame, test_frame],
+        seed,
+    )
+    metrics = _evaluate(validation_frame, validation_scores)
+    return _success(
+        "full",
+        **metrics,
+        fold_primaries=[item["primary"] for item in fold_metrics],
+        val_scores=validation_scores,
+        val_user_ids=_column(validation_frame, "user_id"),
+        test_scores=test_scores,
+    )
+
+
+def _run_confirm(config: dict, seed: int) -> dict:
+    runs = []
+    for offset in range(5):
+        run_seed = seed + offset
+        _seed_everything(run_seed)
+        run = _run_full(config, run_seed)
+        if run["primary"] > LEAK_CANARY_PRIMARY:
+            raise LeakSuspectedError(run["primary"])
+        runs.append(run)
+    metrics = _mean_metrics(runs)
+    fold_primaries = np.mean(
+        np.asarray([run["fold_primaries"] for run in runs], dtype=float), axis=0
+    ).tolist()
+    return _success(
+        "confirm",
+        **metrics,
+        fold_primaries=fold_primaries,
+        val_scores=np.mean([run["val_scores"] for run in runs], axis=0),
+        val_user_ids=runs[0]["val_user_ids"],
+        test_scores=np.mean([run["test_scores"] for run in runs], axis=0),
+    )
+
+
+def _child_entry(send_conn, config: dict, fidelity: str, seed: int) -> None:
+    started = time.monotonic()
+    try:
+        result = _execute_tier(config, fidelity, seed)
+    except BaseException as exc:  # the public contract must contain every worker failure
+        extra = {"primary": exc.primary} if isinstance(exc, LeakSuspectedError) else {}
+        result = _error_record(
+            "leakage" if isinstance(exc, LeakSuspectedError) else fidelity,
+            _classify_exception(exc),
+            started,
+            traceback_module.format_exc(),
+            **extra,
+        )
+
+    try:
+        send_conn.send(result)
+    finally:
+        send_conn.close()
+
+
+def _process_context():
+    """Prefer fork so dynamically registered experiment components are inherited."""
+    methods = mp.get_all_start_methods()
+    return mp.get_context("fork" if "fork" in methods else "spawn")
+
+
+def _stop_process(process) -> None:
+    if process is None:
+        return
+    try:
+        alive = process.is_alive()
+    except (AssertionError, ValueError):
+        return
+    if not alive:
+        process.join(PROCESS_STOP_GRACE_S)
+        return
+    process.terminate()
+    process.join(PROCESS_STOP_GRACE_S)
+    if process.is_alive():
+        process.kill()
+        process.join(PROCESS_STOP_GRACE_S)
+
+
+def _result_schema_issue(result: dict, fidelity: str) -> str | None:
+    status = result.get("status")
+    if status == "error":
+        required = ("stage", "error_class", "traceback", "seconds")
+        missing = [name for name in required if name not in result]
+        if missing:
+            return f"error result missing fields: {missing}"
+        if result["error_class"] not in ERROR_CLASSES:
+            return f"unsupported error_class {result['error_class']!r}"
+        return None
+    if status != "ok":
+        return f"worker status must be 'ok' or 'error', got {status!r}"
+
+    required = (
+        "fidelity", "gauc", "ndcg", "primary", "fold_primaries", "segments",
+        "val_scores", "val_user_ids", "test_scores", "seconds", "gpu_seconds",
+        "peak_rss_mb",
+    )
+    missing = [name for name in required if name not in result]
+    if missing:
+        return f"success result missing fields: {missing}"
+    if result["fidelity"] != fidelity:
+        return f"worker returned fidelity {result['fidelity']!r}, expected {fidelity!r}"
+
+    metrics = (result["gauc"], result["ndcg"], result["primary"])
+    if fidelity == "smoke":
+        if any(value is not None for value in metrics):
+            return "smoke must skip gauc, ndcg, and primary metrics"
+    elif any(not isinstance(value, Real) or not np.isfinite(value) for value in metrics):
+        return "gauc, ndcg, and primary must be finite numbers"
+
+    fold_primaries = np.asarray(result["fold_primaries"], dtype=float)
+    if fold_primaries.ndim != 1 or not np.isfinite(fold_primaries).all():
+        return "fold_primaries must be a finite one-dimensional sequence"
+    expected_folds = 0 if fidelity == "smoke" else 3
+    if len(fold_primaries) != expected_folds:
+        return f"{fidelity} must return exactly {expected_folds} fold primary scores"
+    if not isinstance(result["segments"], dict):
+        return "segments must be a dictionary"
+
+    for name in ("seconds", "gpu_seconds", "peak_rss_mb"):
+        value = result[name]
+        if not isinstance(value, Real) or not np.isfinite(value) or value < 0:
+            return f"{name} must be a finite non-negative number"
+
+    val_scores = np.asarray(result["val_scores"])
+    val_user_ids = np.asarray(result["val_user_ids"])
+    test_scores = np.asarray(result["test_scores"])
+    if val_scores.ndim != 1 or test_scores.ndim != 1 or val_user_ids.ndim != 1:
+        return "score and user-id outputs must be one-dimensional"
+    if len(val_scores) != len(val_user_ids):
+        return "val_scores and val_user_ids must remain aligned"
+    if not np.isfinite(val_scores).all() or not np.isfinite(test_scores).all():
+        return "validation and test scores must be finite"
+    return None
 
 
 def run_experiment(
@@ -45,4 +509,97 @@ def run_experiment(
 
     MUST return status="error", error_class="leak_suspected" if primary > 0.75.
     """
-    raise NotImplementedError("C1")
+    started = time.monotonic()
+
+    try:
+        if fidelity not in FIDELITIES:
+            raise ValueError(f"unknown fidelity {fidelity!r}; expected one of {FIDELITIES}")
+        if isinstance(timeout_s, bool) or not isinstance(timeout_s, Real) or timeout_s <= 0:
+            raise ValueError("timeout_s must be a positive number")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError("seed must be an integer")
+        parsed_config = Config.model_validate(config).model_dump()
+    except (TypeError, ValueError, ValidationError) as exc:
+        return _error_record(
+            "validation",
+            "schema",
+            started,
+            "".join(traceback_module.format_exception_only(type(exc), exc)),
+        )
+
+    receive_conn = send_conn = process = None
+    try:
+        context = _process_context()
+        receive_conn, send_conn = context.Pipe(duplex=False)
+        process = context.Process(
+            target=_child_entry,
+            args=(send_conn, parsed_config, fidelity, seed),
+            daemon=True,
+        )
+        process.start()
+        send_conn.close()
+        send_conn = None
+
+        if not receive_conn.poll(timeout_s):
+            _stop_process(process)
+            return _error_record(
+                fidelity,
+                "timeout",
+                started,
+                f"experiment exceeded timeout_s={timeout_s}",
+            )
+
+        try:
+            result = receive_conn.recv()
+        except (EOFError, OSError) as exc:
+            process.join(PROCESS_STOP_GRACE_S)
+            error_class = "oom" if process.exitcode == -signal.SIGKILL else "transient"
+            return _error_record(
+                fidelity,
+                error_class,
+                started,
+                "".join(traceback_module.format_exception_only(type(exc), exc)),
+            )
+        finally:
+            process.join(PROCESS_STOP_GRACE_S)
+            if process.is_alive():
+                _stop_process(process)
+    except BaseException as exc:
+        _stop_process(process)
+        return _error_record(
+            fidelity,
+            _classify_exception(exc),
+            started,
+            traceback_module.format_exc(),
+        )
+    finally:
+        if receive_conn is not None:
+            receive_conn.close()
+        if send_conn is not None:
+            send_conn.close()
+
+    if not isinstance(result, dict):
+        return _error_record(
+            fidelity,
+            "schema",
+            started,
+            f"worker result must be a dict, got {type(result).__name__}",
+        )
+    result.setdefault("seconds", time.monotonic() - started)
+    try:
+        schema_issue = _result_schema_issue(result, fidelity)
+    except (TypeError, ValueError) as exc:
+        schema_issue = "".join(traceback_module.format_exception_only(type(exc), exc))
+    if schema_issue is not None:
+        return _error_record(fidelity, "schema", started, schema_issue)
+
+    primary = result.get("primary")
+    if result.get("status") == "ok" and primary is not None and primary > LEAK_CANARY_PRIMARY:
+        return _error_record(
+            "leakage",
+            "leak_suspected",
+            started,
+            f"primary {result['primary']:.6f} exceeds canary {LEAK_CANARY_PRIMARY:.2f}",
+            primary=result["primary"],
+        )
+    return result
