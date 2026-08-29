@@ -31,6 +31,6 @@ repos:
     # a clean local run fails on the runner.
     rev: v0.16.5
     hooks:
-      - id: ruff
+      - id: ruff-check
         args: ["--fix"]
         # ruff reads its own extend-exclude from pyproject.toml.
