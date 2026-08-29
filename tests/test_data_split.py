@@ -2,10 +2,10 @@
 row order matches the starter kit."""
 
 from __future__ import annotations
+
 import pytest
 
 from pipeline.data import N_TEST, N_TRAIN, N_VAL
-from tests.conftest import todo
 
 
 def test_split_constants_match_the_brief():
@@ -32,8 +32,6 @@ def test_assertion_fires_if_splits_swapped():
 
     with pytest.raises(AssertionError):
         _assert_split_order(val, train, test)
-
-
 
 def test_row_order_matches_starter_kit():
     """row_id is a positional index into the split; any reordering breaks

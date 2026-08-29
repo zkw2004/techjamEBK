@@ -38,6 +38,7 @@ LOG_FILES = (
 )
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
 # Randomised-exposure log: 1.18M rows dated 2022-04-22 to 2022-05-08, i.e.
 # ENTIRELY after the training cutoff. Usable as an unbiased validation set
 # only. Cannot be used for training-time debiasing (see B8 note in README).
@@ -50,6 +51,7 @@ INTERNAL_FOLDS = [
     ("2022-04-08", "2022-04-19", "2022-04-20", "2022-04-21"),
 ]  # (train_start, train_end, val_start, val_end)
 
+
 def _assert_split_order(
     train: DataFrame,
     val: DataFrame,
@@ -57,6 +59,7 @@ def _assert_split_order(
 ) -> None:
     """Fail if the official splits are not strictly chronological."""
     assert train["date"].max() < val["date"].min() < test["date"].min()
+
 
 def load() -> tuple[DataFrame, DataFrame, DataFrame]:
     """Returns (train, val, test) in the organisers' exact row order.
@@ -74,7 +77,7 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
     )
 
     vid2author = dict(
-        zip(video_features["video_id"], video_features["author_id"])
+        zip(video_features["video_id"], video_features["author_id"], strict=True)
     )
 
     frames = []
@@ -85,27 +88,15 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
 
     rows = pd.concat(frames, ignore_index=True)
 
-    rows["author_id"] = (
-        rows["video_id"]
-        .astype(str)
-        .map(vid2author)
-        .fillna("UNK")
-    )
+    rows["author_id"] = rows["video_id"].astype(str).map(vid2author).fillna("UNK")
 
-    dates = pd.to_datetime(
-        rows["date"].astype(str),
-        format="%Y%m%d",
-    )
+    dates = pd.to_datetime(rows["date"].astype(str), format="%Y%m%d")
 
     train = rows.loc[dates <= TRAIN_END].copy()
 
-    val = rows.loc[
-        (dates >= VAL_START) & (dates <= VAL_END)
-    ].copy()
+    val = rows.loc[(dates >= VAL_START) & (dates <= VAL_END)].copy()
 
-    test = rows.loc[
-        dates >= TEST_START
-    ].copy()
+    test = rows.loc[dates >= TEST_START].copy()
 
     # B1 safety check: official splits must be strictly chronological.
     _assert_split_order(train, val, test)
@@ -116,6 +107,7 @@ def load() -> tuple[DataFrame, DataFrame, DataFrame]:
     assert len(test) == N_TEST, f"Expected {N_TEST} test rows, got {len(test)}"
 
     return train, val, test
+
 
 def internal_folds() -> list[tuple[DataFrame, DataFrame]]:
     """Three expanding-window folds inside the training period.
