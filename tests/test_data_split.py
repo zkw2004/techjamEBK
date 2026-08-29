@@ -40,7 +40,6 @@ def test_dates_are_strictly_ordered_across_splits():
     assert train["date"].max() < val["date"].min() < test["date"].min()
 
 
-@requires_data
 def test_assertion_fires_if_splits_swapped():
     """Hand the order check a val/train swap and it must raise, not warn."""
     from pipeline.data import _assert_split_order
