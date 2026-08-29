@@ -20,10 +20,10 @@ dependencies = [
 # `pip install -e ".[dev]"` needs [project.optional-dependencies]. Keep the
 # two lists in sync.
 [project.optional-dependencies]
-dev = ["pytest", "ruff", "pre-commit", "detect-secrets"]
+dev = ["pytest", "ruff==0.16.5", "pre-commit", "detect-secrets"]
 
 [dependency-groups]
-dev = ["pytest", "ruff", "pre-commit", "detect-secrets"]
+dev = ["pytest", "ruff==0.16.5", "pre-commit", "detect-secrets"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -26,7 +26,10 @@ repos:
         exclude: '^(kuairand-starter-kit/|pipeline/(evaluate|submit)\.py$)'
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.8.4
+    # Keep this rev and the pinned `ruff==` in pyproject's dev deps in step.
+    # When they drift, CI enforces a different rule set than local hooks and
+    # a clean local run fails on the runner.
+    rev: v0.16.5
     hooks:
       - id: ruff
         args: ["--fix"]
