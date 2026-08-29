@@ -65,17 +65,36 @@ FORBIDDEN_SAME_ROW = [
 # baseline we must beat already uses.
 
 EXCLUDED_SOURCES = ["item_statistics_monthly"]  # see 6.8
+INITIAL_RATE = 0.5
 
 
 def _parse_dates(values: pd.Series) -> pd.Series:
-    """Parse integer, float-promoted, or ISO-formatted calendar dates."""
+    """Parse integer, float-promoted, ISO, or pandas calendar dates."""
+    if isinstance(values.dtype, pd.DatetimeTZDtype) or pd.api.types.is_datetime64_any_dtype(
+        values.dtype
+    ):
+        return pd.to_datetime(values, errors="coerce")
+
     date_strings = (
         values.astype("string")
         .str.strip()
         .str.replace("-", "", regex=False)
         .str.replace(r"\.0$", "", regex=True)
     )
-    return pd.to_datetime(date_strings, format="%Y%m%d", errors="coerce")
+    parsed = pd.to_datetime(date_strings, format="%Y%m%d", errors="coerce")
+
+    # Timestamp strings with a time component are not YYYYMMDD, but are still
+    # valid inputs. Never apply this fallback to numeric calendar values:
+    # pandas would otherwise interpret an invalid 20220431 as epoch nanoseconds.
+    numeric = pd.to_numeric(values, errors="coerce")
+    fallback_mask = parsed.isna() & values.notna() & numeric.isna()
+    if fallback_mask.any():
+        parsed.loc[fallback_mask] = pd.to_datetime(
+            values.loc[fallback_mask],
+            format="mixed",
+            errors="coerce",
+        )
+    return parsed
 
 
 def _assert_historical_cutoff(train_df, target_df) -> None:
@@ -99,6 +118,100 @@ def _numeric_labels(train_df) -> pd.Series:
     if labels.isna().any() or not np.isfinite(labels.to_numpy(dtype=np.float64)).all():
         raise ValueError(f"training column {LABEL!r} must contain only finite numbers")
     return labels.astype(np.float64)
+
+
+def _event_times(frame) -> pd.Series:
+    """Return the pre-impression event timestamp used for in-sample history.
+
+    The raw logs are not stored in chronological row order, so their positional
+    order cannot establish a historical cutoff. ``time_ms`` is the impression
+    timestamp; records sharing it intentionally see the same prior state and
+    never one another's label.
+    """
+    if "time_ms" not in frame:
+        raise ValueError("in-sample historical features require a time_ms column")
+    times = pd.to_numeric(frame["time_ms"], errors="coerce")
+    if times.isna().any() or not np.isfinite(times.to_numpy(dtype=np.float64)).all():
+        raise ValueError("in-sample historical features require finite time_ms values")
+    return times.astype(np.int64)
+
+
+def _prior_global_rates(labels: pd.Series, times: pd.Series) -> np.ndarray:
+    """Global long-view rate strictly before each event timestamp."""
+    source = pd.DataFrame(
+        {
+            "_position": np.arange(len(labels)),
+            "_time": times.to_numpy(),
+            "_label": labels.to_numpy(),
+        }
+    )
+    by_time = source.groupby("_time", sort=True)["_label"].agg(["sum", "count"])
+    by_time["_prior_sum"] = by_time["sum"].cumsum() - by_time["sum"]
+    by_time["_prior_count"] = by_time["count"].cumsum() - by_time["count"]
+    states = source.merge(
+        by_time[["_prior_sum", "_prior_count"]].reset_index(),
+        on="_time",
+        how="left",
+        sort=False,
+        validate="many_to_one",
+    ).sort_values("_position", kind="stable")
+    prior_count = states["_prior_count"].to_numpy(dtype=np.float64)
+    prior_sum = states["_prior_sum"].to_numpy(dtype=np.float64)
+    return np.divide(
+        prior_sum,
+        prior_count,
+        out=np.full(len(source), INITIAL_RATE, dtype=np.float64),
+        where=prior_count > 0,
+    )
+
+
+def _prior_group_stats(
+    frame,
+    labels: pd.Series,
+    times: pd.Series,
+    keys: list[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Label sum/count for each key tuple strictly before its event time."""
+    source = pd.DataFrame(
+        {
+            "_position": np.arange(len(frame)),
+            "_time": times.to_numpy(),
+            "_label": labels.to_numpy(),
+            **{key: frame[key].to_numpy() for key in keys},
+        }
+    )
+    group_keys = [*keys, "_time"]
+    grouped = source.groupby(group_keys, sort=True, dropna=False)["_label"].agg(["sum", "count"])
+    key_levels = list(range(len(keys)))
+    grouped["_prior_sum"] = grouped.groupby(level=key_levels, sort=False)["sum"].cumsum()
+    grouped["_prior_sum"] -= grouped["sum"]
+    grouped["_prior_count"] = grouped.groupby(level=key_levels, sort=False)["count"].cumsum()
+    grouped["_prior_count"] -= grouped["count"]
+    states = source.merge(
+        grouped[["_prior_sum", "_prior_count"]].reset_index(),
+        on=group_keys,
+        how="left",
+        sort=False,
+        validate="many_to_one",
+    ).sort_values("_position", kind="stable")
+    return (
+        states["_prior_sum"].to_numpy(dtype=np.float64),
+        states["_prior_count"].to_numpy(dtype=np.float64),
+    )
+
+
+def _in_sample_group_rate(train_df, key: str) -> np.ndarray:
+    labels = _numeric_labels(train_df)
+    times = _event_times(train_df)
+    global_rates = _prior_global_rates(labels, times)
+    prior_sum, prior_count = _prior_group_stats(train_df, labels, times, [key])
+    return np.divide(prior_sum, prior_count, out=global_rates, where=prior_count > 0)
+
+
+def _in_sample_group_count(train_df, key: str) -> np.ndarray:
+    labels = _numeric_labels(train_df)
+    _, prior_count = _prior_group_stats(train_df, labels, _event_times(train_df), [key])
+    return prior_count
 
 
 def _group_rate(train_df, target_df, key: str) -> np.ndarray:
@@ -129,24 +242,32 @@ def _split_tags(value) -> tuple[str, ...]:
 @feature("user_ctr")
 def user_ctr(train_df, target_df) -> np.ndarray:
     """Raw historical long-view rate by user; unseen users use the train mean."""
+    if train_df is target_df:
+        return _in_sample_group_rate(train_df, "user_id")
     return _group_rate(train_df, target_df, "user_id")
 
 
 @feature("video_ctr")
 def video_ctr(train_df, target_df) -> np.ndarray:
     """Raw historical long-view rate by video; unseen videos use the train mean."""
+    if train_df is target_df:
+        return _in_sample_group_rate(train_df, "video_id")
     return _group_rate(train_df, target_df, "video_id")
 
 
 @feature("video_impressions")
 def video_impressions(train_df, target_df) -> np.ndarray:
     """Historical impression count by video; unseen videos receive zero."""
+    if train_df is target_df:
+        return _in_sample_group_count(train_df, "video_id")
     return _group_count(train_df, target_df, "video_id")
 
 
 @feature("user_activity")
 def user_activity(train_df, target_df) -> np.ndarray:
     """Historical impression count by user; unseen users receive zero."""
+    if train_df is target_df:
+        return _in_sample_group_count(train_df, "user_id")
     return _group_count(train_df, target_df, "user_id")
 
 
@@ -159,6 +280,9 @@ def user_tag_affinity(train_df, target_df) -> np.ndarray:
     use the global training rate, keeping this feature neutral while the
     separate ``user_ctr`` feature carries general user propensity.
     """
+    if train_df is target_df:
+        return _in_sample_user_tag_affinity(train_df)
+
     _assert_historical_cutoff(train_df, target_df)
     labels = _numeric_labels(train_df)
     global_rate = float(labels.mean())
@@ -196,6 +320,52 @@ def user_tag_affinity(train_df, target_df) -> np.ndarray:
     return result
 
 
+def _in_sample_user_tag_affinity(train_df) -> np.ndarray:
+    """Per-row user-tag affinity using only impressions at earlier times."""
+    labels = _numeric_labels(train_df)
+    times = _event_times(train_df)
+    global_rates = _prior_global_rates(labels, times)
+    result = global_rates.copy()
+
+    exploded = pd.DataFrame(
+        {
+            "_position": np.arange(len(train_df)),
+            "_time": times.to_numpy(),
+            "user_id": train_df["user_id"].to_numpy(),
+            LABEL: labels.to_numpy(),
+            "_tag": train_df["tag"].map(_split_tags).to_numpy(),
+        }
+    ).explode("_tag", ignore_index=True)
+    exploded = exploded.loc[exploded["_tag"].notna()].copy()
+    if exploded.empty:
+        return result
+
+    group_keys = ["user_id", "_tag", "_time"]
+    grouped = exploded.groupby(group_keys, sort=True, dropna=False)[LABEL].agg(["sum", "count"])
+    grouped["_prior_sum"] = grouped.groupby(level=[0, 1], sort=False)["sum"].cumsum()
+    grouped["_prior_sum"] -= grouped["sum"]
+    grouped["_prior_count"] = grouped.groupby(level=[0, 1], sort=False)["count"].cumsum()
+    grouped["_prior_count"] -= grouped["count"]
+    states = exploded.merge(
+        grouped[["_prior_sum", "_prior_count"]].reset_index(),
+        on=group_keys,
+        how="left",
+        sort=False,
+        validate="many_to_one",
+    )
+    fallback = global_rates[states["_position"].to_numpy(dtype=int)]
+    prior_count = states["_prior_count"].to_numpy(dtype=np.float64)
+    states["_affinity"] = np.divide(
+        states["_prior_sum"].to_numpy(dtype=np.float64),
+        prior_count,
+        out=fallback,
+        where=prior_count > 0,
+    )
+    per_row = states.groupby("_position", sort=False)["_affinity"].mean()
+    result[per_row.index.to_numpy(dtype=int)] = per_row.to_numpy(dtype=np.float64)
+    return result
+
+
 @feature("hour_of_day")
 def hour_of_day(train_df, target_df) -> np.ndarray:
     """Pre-impression hour from HHMM context; invalid or missing values use -1."""
@@ -220,18 +390,113 @@ def eb_smooth(clicks, impressions, global_rate, alpha: float = 20.0):
     """Empirical-Bayes shrinkage toward the global rate.
 
     Sparse groups (small n) collapse to global_rate; dense groups keep
-    their own rate. Fit alpha on internal folds only. (B5)
+    their own rate. ``clicks`` and ``impressions`` may be fractional after
+    time weighting. Callers must select alpha on internal folds only. (B5)
     """
-    raise NotImplementedError("B5")
+    try:
+        alpha = float(alpha)
+        global_rate = float(global_rate)
+        click_values = np.asarray(clicks, dtype=np.float64)
+        impression_values = np.asarray(impressions, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("EB inputs must be numeric") from exc
+
+    if not np.isfinite(alpha) or alpha <= 0:
+        raise ValueError("alpha must be finite and greater than zero")
+    if not np.isfinite(global_rate) or not 0 <= global_rate <= 1:
+        raise ValueError("global_rate must be finite and between zero and one")
+    if isinstance(clicks, pd.Series) and isinstance(impressions, pd.Series):
+        if not clicks.index.equals(impressions.index):
+            raise ValueError("click and impression Series must have identical indexes")
+    if click_values.ndim and impression_values.ndim:
+        if click_values.shape != impression_values.shape:
+            raise ValueError("clicks and impressions must have matching shapes")
+
+    try:
+        click_values, impression_values = np.broadcast_arrays(click_values, impression_values)
+    except ValueError as exc:
+        raise ValueError("clicks and impressions are not broadcast-compatible") from exc
+
+    if not np.isfinite(click_values).all() or not np.isfinite(impression_values).all():
+        raise ValueError("clicks and impressions must be finite")
+    if (click_values < 0).any() or (impression_values < 0).any():
+        raise ValueError("clicks and impressions must be non-negative")
+    if (click_values > impression_values).any():
+        raise ValueError("clicks cannot exceed impressions")
+
+    result = (click_values + alpha * global_rate) / (impression_values + alpha)
+    if isinstance(clicks, pd.Series):
+        return pd.Series(result, index=clicks.index, name=clicks.name)
+    if isinstance(impressions, pd.Series):
+        return pd.Series(result, index=impressions.index, name=impressions.name)
+    if result.ndim == 0:
+        return float(result)
+    return result
 
 
 def decay_weights(dates, cutoff, half_life_days: float = 7.0) -> np.ndarray:
     """Exponential recency weights: 0.5 ** (age_days / half_life_days).
 
     Recent behaviour predicts the near future better, and the test window
-    sits 8-17 days out. Half-life fitted on internal folds only. (B5)
+    sits 8-17 days out. Callers must select the half-life on internal folds
+    only. Dates after the fitting cutoff are rejected. (B5)
     """
-    raise NotImplementedError("B5")
+    try:
+        half_life_days = float(half_life_days)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("half_life_days must be numeric") from exc
+    if not np.isfinite(half_life_days) or half_life_days <= 0:
+        raise ValueError("half_life_days must be finite and greater than zero")
+
+    if isinstance(dates, pd.Series):
+        date_values = dates.reset_index(drop=True)
+    elif np.isscalar(dates):
+        date_values = pd.Series([dates])
+    else:
+        date_values = pd.Series(dates)
+
+    parsed_dates = _parse_dates(date_values)
+    parsed_cutoff = _parse_dates(pd.Series([cutoff])).iloc[0]
+    if pd.isna(parsed_cutoff):
+        raise ValueError("cutoff must be a valid calendar date")
+    if parsed_dates.isna().any():
+        raise ValueError("dates must contain only valid calendar dates")
+
+    age_days = (parsed_cutoff - parsed_dates).dt.total_seconds() / 86_400.0
+    if (age_days < 0).any():
+        raise ValueError("dates cannot be later than cutoff")
+    return np.power(0.5, age_days.to_numpy(dtype=np.float64) / half_life_days)
+
+
+@feature("user_ctr_decayed")
+def user_ctr_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical long-view rate per user.
+
+    The train-wide maximum date is the decay cutoff. The global prior is the
+    unweighted training label mean, matching Appendix A.1. Alpha and half-life
+    use helper defaults here; alternative values must be screened on B2's
+    internal folds before a caller adopts them.
+    """
+    _assert_historical_cutoff(train_df, target_df)
+    labels = _numeric_labels(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("user_ctr_decayed requires valid training dates")
+
+    weights = decay_weights(dates, dates.max())
+    fitting_rows = pd.DataFrame(
+        {
+            "user_id": train_df["user_id"].to_numpy(),
+            "_weighted_positive": weights * labels.to_numpy(),
+            "_weight": weights,
+        }
+    )
+    grouped = fitting_rows.groupby("user_id", sort=False)
+    weighted_positives = grouped["_weighted_positive"].sum()
+    effective_impressions = grouped["_weight"].sum()
+    global_rate = float(labels.mean())
+    rates = eb_smooth(weighted_positives, effective_impressions, global_rate)
+    return target_df["user_id"].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
 
 
 # --- Leakage guard (B6, Appendix A.2) ---------------------------------------
