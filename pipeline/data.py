@@ -116,4 +116,31 @@ def internal_folds() -> list[tuple[DataFrame, DataFrame]]:
     Used for screening, early stopping, blend weights, and EB
     hyperparameters. NEVER touches the official validation window.
     """
-    raise NotImplementedError("B2")
+    train, _, _ = load()
+    dates = pd.to_datetime(train["date"].astype(str), format="%Y%m%d")
+    official_val_start = pd.Timestamp(VAL_START)
+    folds = []
+
+    for train_start, train_end, val_start, val_end in INTERNAL_FOLDS:
+        train_start_ts = pd.Timestamp(train_start)
+        train_end_ts = pd.Timestamp(train_end)
+        val_start_ts = pd.Timestamp(val_start)
+        val_end_ts = pd.Timestamp(val_end)
+
+        fold_train_mask = dates.between(train_start_ts, train_end_ts, inclusive="both")
+        fold_val_mask = dates.between(val_start_ts, val_end_ts, inclusive="both")
+
+        # Boolean selection preserves the organiser's original row order.
+        fold_train = train.loc[fold_train_mask].copy()
+        fold_val = train.loc[fold_val_mask].copy()
+        fold_train_dates = dates.loc[fold_train_mask]
+        fold_val_dates = dates.loc[fold_val_mask]
+
+        assert not fold_train.empty, f"Empty internal training window: {train_start}–{train_end}"
+        assert not fold_val.empty, f"Empty internal validation window: {val_start}–{val_end}"
+        assert fold_train_dates.max() < fold_val_dates.min()
+        assert fold_val_dates.max() < official_val_start
+
+        folds.append((fold_train, fold_val))
+
+    return folds
