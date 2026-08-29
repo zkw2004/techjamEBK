@@ -9,13 +9,15 @@ decision so an interrupted run can be inspected and resumed safely.
 from __future__ import annotations
 
 import math
+import random as random_module
 import time
 from collections.abc import Callable
 from copy import deepcopy
 from statistics import median
+from typing import Any
 
 from agent import execute, manifest, propose, recovery, store
-from agent.schema import Action
+from agent.schema import FAMILIES, Action
 
 EPSILON = 0.002
 NO_IMPROVEMENT_ITERATIONS = 3
@@ -34,14 +36,77 @@ ROOT_PARENT = {
 }
 
 
-def select_parent(nodes: list[dict]) -> dict:
+def _branchable(history: list[dict]) -> list[dict]:
+    """Nodes a proposal can legitimately branch from.
+
+    Restricted to completed full/confirm evaluations with a finite primary —
+    the same filter A6's placeholder used. A smoke or screen pilot never
+    became the branch point: it was screened cheaply precisely so it would
+    not consume attention (or official validation) as if it were evidence.
+    """
+    return [
+        node
+        for node in history
+        if node.get("status") == "ok"
+        and node.get("fidelity") in {"full", "confirm"}
+        and isinstance(node.get("metrics", {}).get("primary"), (int, float))
+    ]
+
+
+def _family_counts(history: list[dict]) -> dict[str, int]:
+    """How many attempts (any fidelity, any outcome) exist per family.
+
+    Matches ``propose._families_covered``: a family is being explored the
+    moment it is attempted, not only once it produces an accepted node.
+    """
+    counts = dict.fromkeys(FAMILIES, 0)
+    for node in history:
+        family = node.get("family")
+        if family in counts:
+            counts[family] += 1
+    return counts
+
+
+def select_parent(nodes: list[dict], *, rng: Any = None) -> dict:
     """Family-diverse + epsilon-greedy parent selection.
 
-    A7 owns this policy.  A6 uses its deliberately simple private parent
-    selection below so it can land independently without prematurely changing
-    the A7 contract.
+    Two failure modes this guards against, both real risks in a tree search
+    this short: always extending the best node turns the loop into local
+    hill-climbing that never revisits a family it tried once and abandoned,
+    and picking randomly wastes iterations on lineages the run has already
+    made a case against.
+
+    With probability ``1 - EPSILON_GREEDY`` (exploit): the best branchable
+    node, exactly as A6's placeholder chose it.
+
+    With probability ``EPSILON_GREEDY`` (explore): a *non-best* branchable
+    node, sampled with probability inversely proportional to how many times
+    its family has already been attempted. This is what the acceptance
+    criterion's "≥15% of nodes branch from a non-best parent" is checking,
+    and the family weighting is what makes that 15% land on the families
+    that most need attention rather than uniformly everywhere.
+
+    One honest limit: ``family`` is a field the LLM sets on the proposed
+    ``Action``, not something this function can dictate — select_parent
+    chooses which existing node to anchor on, and biases exploration toward
+    under-covered families, but full coverage is a joint outcome of this
+    weighting and the "prefer an uncovered family" instruction already sent
+    to the proposer in ``propose.py``.
     """
-    raise NotImplementedError("A7")
+    rng = rng if rng is not None else random_module
+    candidates = _branchable(nodes)
+    if not candidates:
+        return dict(ROOT_PARENT)
+
+    best = max(candidates, key=lambda node: float(node["metrics"]["primary"]))
+    others = [node for node in candidates if node.get("id") != best.get("id")]
+
+    if others and rng.random() < EPSILON_GREEDY:
+        counts = _family_counts(nodes)
+        weights = [1.0 / (1 + counts.get(node.get("family"), 0)) for node in others]
+        return rng.choices(others, weights=weights, k=1)[0]
+
+    return best
 
 
 def converged(history: list[dict]) -> bool:
@@ -64,24 +129,6 @@ def converged(history: list[dict]) -> bool:
         return False
     prior_best = max(primaries[:-window])
     return all(score <= prior_best + EPSILON for score in primaries[-window:])
-
-
-def _parent_for_a6(history: list[dict]) -> dict:
-    """Use the best completed full run, or the root before one exists.
-
-    A7 replaces this with its family-diverse, epsilon-greedy selector.  Using
-    full nodes here avoids branching a new proposal from a smoke-only pilot.
-    """
-    candidates = [
-        node
-        for node in history
-        if node.get("status") == "ok"
-        and node.get("fidelity") in {"full", "confirm"}
-        and isinstance(node.get("metrics", {}).get("primary"), (int, float))
-    ]
-    if not candidates:
-        return dict(ROOT_PARENT)
-    return max(candidates, key=lambda node: float(node["metrics"]["primary"]))
 
 
 def _persist(node: dict, *, tokens: dict | None = None, repair_attempted: bool = False) -> dict:
@@ -256,7 +303,7 @@ def run(
         history = store.list_nodes()
         if converged(history):
             break
-        parent = _parent_for_a6(history)
+        parent = select_parent(history)
         try:
             action, usage = propose.propose(history, knowledge, parent)
         except propose.ProposeError as exc:
