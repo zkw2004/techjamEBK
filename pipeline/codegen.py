@@ -290,18 +290,25 @@ def vet_generated_feature(
     started = time.monotonic()
     try:
         train_frame, validation_frame, _ = train._load_data()
-        leakage_check(fn, train_frame, validation_frame)
+        safe = leakage_check(fn, train_frame, validation_frame)
     except (AssertionError, ValueError) as exc:
         stages.append(_stage("leakage", False, str(exc), time.monotonic() - started))
         return report("quarantined", f"leakage audit failed: {exc}")
-    except Exception as exc:  # broken code discovered by the probes, not a leak
+    except Exception as exc:  # broken code discovered by the probe, not a leak
         detail = f"{type(exc).__name__}: {exc}"
         stages.append(_stage("leakage", False, detail, time.monotonic() - started))
         return report("rejected", f"feature raised during the leakage audit ({detail})")
+    if not safe:
+        detail = (
+            "the static source scan or the outcome-corruption probe found the "
+            "feature reading same-row outcomes off target rows (trap 2)"
+        )
+        stages.append(_stage("leakage", False, detail, time.monotonic() - started))
+        return report("quarantined", f"leakage audit failed: {detail}")
     stages.append(
         _stage(
             "leakage", True,
-            "static scan and dynamic outcome probes found no target-side reads",
+            "static scan and outcome-corruption probe found no target-side reads",
             time.monotonic() - started,
         )
     )

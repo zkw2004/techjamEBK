@@ -9,6 +9,7 @@ That shape makes leakage the exception rather than the default.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 
 import numpy as np
@@ -503,50 +504,17 @@ def user_ctr_decayed(train_df, target_df) -> np.ndarray:
 
 _PROBE_TRAIN_ROWS = 2_000
 _PROBE_TARGET_ROWS = 1_000
-_PROBE_SEED = 20220429  # first hidden-test day; fixed so the guard is deterministic
-
-
-def _frame_length(frame) -> int:
-    if hasattr(frame, "__len__") and not isinstance(frame, dict):
-        return len(frame)
-    lengths = {len(v) for v in frame.values()}
-    return lengths.pop() if lengths else 0
-
-
-def _frame_head(frame, rows: int):
-    if isinstance(frame, dict):
-        return {name: np.asarray(values)[:rows].copy() for name, values in frame.items()}
-    return frame.head(rows).copy()
-
-
-def _frame_columns(frame) -> tuple[str, ...]:
-    if isinstance(frame, dict):
-        return tuple(frame)
-    return tuple(getattr(frame, "columns", ()))
-
-
-def _with_shuffled(frame, columns: list[str], rng: np.random.Generator):
-    """Copy of `frame` with each named column independently permuted."""
-    if isinstance(frame, dict):
-        out = dict(frame)
-        for name in columns:
-            out[name] = rng.permutation(np.asarray(frame[name]))
-        return out
-    out = frame.copy()
-    for name in columns:
-        out[name] = rng.permutation(out[name].to_numpy())
-    return out
 
 
 def _feature_source(fn: Callable) -> str:
     """Source text for the static scan. Fails closed when none is recoverable.
 
-    Generated features (exec'd from a code string) have no file for
-    `inspect.getsource`; the codegen path attaches the emitted source as
-    `fn.__leak_source__` so they stay auditable.
+    Generated features (exec'd from an emitted code string, C4b) have no file
+    behind them for `inspect.getsource`; the codegen path attaches the source
+    as `fn.__leak_source__` so they stay auditable. A callable with neither is
+    refused outright — an unauditable feature is an unavailable feature
+    (Section 6.8, governing rule).
     """
-    import inspect
-
     source = getattr(fn, "__leak_source__", None)
     if isinstance(source, str) and source.strip():
         return source
@@ -559,94 +527,65 @@ def _feature_source(fn: Callable) -> str:
         ) from exc
 
 
-def _static_leak_scan(source: str) -> None:
-    """Reject source that reads the label or a post-exposure column off target_df."""
-    import re
-
-    for column in [LABEL, *FORBIDDEN_SAME_ROW]:
-        pattern = (
-            rf"""target_df\s*(?:\[\s*['"]{column}['"]"""
-            rf"""|\.{column}\b|\.get\(\s*['"]{column}['"])"""
-        )
-        match = re.search(pattern, source)
-        if match:
-            raise ValueError(
-                f"feature source reads same-row outcome {column!r} off target_df "
-                f"({match.group(0)!r}); post-exposure signals are never inputs (trap 2)"
-            )
-    for name in EXCLUDED_SOURCES:
-        if name in source:
-            raise ValueError(
-                f"feature source references excluded source {name!r}; its aggregation "
-                "window may span the test period (trap 3)"
-            )
-
-
-def _outputs_match(a: np.ndarray, b: np.ndarray) -> bool:
-    a = np.asarray(a, dtype=float)
-    b = np.asarray(b, dtype=float)
-    return a.shape == b.shape and np.allclose(a, b, equal_nan=True)
+def _reads_target_column(src: str, column: str) -> bool:
+    """True if `src` indexes target_df by `column`, either quote style."""
+    return f'target_df["{column}"]' in src or f"target_df['{column}']" in src
 
 
 def leakage_check(fn: Callable, train_df, target_df) -> bool:
-    """Static + probe leakage guard. See Appendix A.2. (B6)
+    """Static + dynamic leakage guard. Returns True iff `fn` is safe. (B6)
 
-    1. Static source check: no target_df["long_view"], no FORBIDDEN_SAME_ROW
-       column read off target_df, no EXCLUDED_SOURCES. Fails closed when the
-       feature's source cannot be recovered.
-    2. Label-independence probe: shuffle train labels; if output is
-       unchanged the feature is label-free (safe) or reading labels off
-       target_df (unsafe) — the static check disambiguates.
-    3. Target-outcome probe: shuffle the label and every forbidden column
-       present on a target sample; any output change proves the feature is
-       reading same-row outcomes, however the read is spelled.
+    CORRECTED vs Appendix A.2's pseudocode. There, the label-independence
+    probe runs first and short-circuits to `return True` whenever shuffling
+    train_df's label leaves the output unchanged — with the static check
+    reached only on the other branch. But a feature that reads
+    target_df[LABEL] directly never looks at train_df's label column either,
+    so shuffling it produces the identical "unchanged" signal and the
+    leak sails through the very probe meant to disambiguate it. This is
+    exactly the class of trap Section 11 warns about: it looks like a
+    reasonable check and silently passes the thing it exists to catch.
 
-    Probes run on fixed-size head samples so the guard stays cheap on the
-    1.1M-row training frame. The final layer is the >0.75 primary canary
-    inside run_experiment (C1).
+    Two independent layers, both must pass:
 
-    Raises ValueError (or lets a feature's own AssertionError propagate) on
-    a detected leak; returns True when every check passes.
+    1. Static source check (authoritative). `fn`'s source must not index
+       target_df by the label, a FORBIDDEN_SAME_ROW column, or reference an
+       EXCLUDED_SOURCES name. Runs unconditionally, first, before `fn` is
+       ever executed on real data. The source is recovered from the file or
+       from `__leak_source__` (generated features); recovery failure raises
+       ValueError rather than passing an unauditable feature.
+    2. Dynamic corruption probe. With the label and every FORBIDDEN_SAME_ROW
+       column on target_df replaced with NaN, `fn`'s output must not change.
+       This catches indirection the source scan cannot see — a column name
+       held in a variable, `.loc` access, a helper called under another
+       name — exactly the kind of code Tier 2 (agent-generated features,
+       Section 7.3) might produce. Legitimate historical aggregates never
+       read those target-row columns at all, so they are untouched by the
+       corruption and pass.
+
+    The probe runs on fixed-size head samples so the guard stays cheap on
+    the 1.1M-row training frame. The third layer is the >0.75 primary
+    canary inside run_experiment (C1).
     """
-    _static_leak_scan(_feature_source(fn))
+    if train_df.empty or target_df.empty:
+        raise ValueError("leakage_check requires non-empty train_df and target_df")
 
-    train_sample = _frame_head(train_df, min(_frame_length(train_df), _PROBE_TRAIN_ROWS))
-    target_sample = _frame_head(target_df, min(_frame_length(target_df), _PROBE_TARGET_ROWS))
-    if _frame_length(train_sample) == 0 or _frame_length(target_sample) == 0:
-        return True
-    rng = np.random.default_rng(_PROBE_SEED)
+    src = _feature_source(fn)
+    if _reads_target_column(src, LABEL):
+        return False
+    for column in FORBIDDEN_SAME_ROW:
+        if _reads_target_column(src, column):
+            return False
+    for source_name in EXCLUDED_SOURCES:
+        if source_name in src:
+            return False
 
-    baseline = np.asarray(fn(train_sample, target_sample), dtype=float)
+    train_sample = train_df.head(_PROBE_TRAIN_ROWS)
+    target_sample = target_df.head(_PROBE_TARGET_ROWS)
+    baseline = np.asarray(fn(train_sample, target_sample))
+    corrupted_target = target_sample.copy()
+    for column in (LABEL, *FORBIDDEN_SAME_ROW):
+        if column in corrupted_target.columns:
+            corrupted_target[column] = np.nan
+    corrupted = np.asarray(fn(train_sample, corrupted_target))
 
-    # Probe 2 (informational, per A.2): label-dependence on the training side
-    # is legal — historical aggregates are supposed to use past labels.
-    if LABEL in _frame_columns(train_sample):
-        fn(_with_shuffled(train_sample, [LABEL], rng), target_sample)
-
-    # Probe 3: reading outcomes off the target rows is never legal.
-    outcome_columns = [
-        name
-        for name in (LABEL, *FORBIDDEN_SAME_ROW)
-        if name in _frame_columns(target_sample)
-    ]
-    if outcome_columns:
-        changed_columns: list[str] = []
-        shuffled_target = target_sample
-        for _ in range(8):  # a draw can coincidentally reproduce a short column
-            shuffled_target = _with_shuffled(target_sample, outcome_columns, rng)
-            changed_columns = [
-                name
-                for name in outcome_columns
-                if not _outputs_match(
-                    np.asarray(target_sample[name]), np.asarray(shuffled_target[name])
-                )
-            ]
-            if changed_columns:
-                break
-        if changed_columns and not _outputs_match(baseline, fn(train_sample, shuffled_target)):
-            raise ValueError(
-                "feature output changed when same-row outcomes "
-                f"{changed_columns!r} were permuted on target rows; it is reading "
-                "post-exposure signals (trap 2)"
-            )
-    return True
+    return bool(np.array_equal(baseline, corrupted, equal_nan=True))
