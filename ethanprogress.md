@@ -178,6 +178,17 @@ LambdaRank implementations.
 
 ## Update log
 
+- 2026-08-29: Pulled and integrated the A and B workstreams. Merged
+  origin/main (A4 executor, A5 recovery, B4 fixes, B5 smoothing, D1-D2
+  manifest), origin/feat/B6-leakage-guard, and origin/feat/A3-propose into
+  `feat/3`. Reconciled B6's `leakage_check` (their static-first bool
+  contract and NaN-corruption probe kept as authority) with the C4b needs
+  (`__leak_source__` recovery that fails closed, head-sampling). Wired
+  `execute()` so `family="feature"` code actions register and use the
+  generated feature (the exec'd namespace was previously discarded), and
+  reclassified guard rejections as `leak_suspected` so A5 quarantines
+  instead of repairing them. Suite 235 passed, Ruff clean, leak demo holds.
+
 - 2026-08-29: Implemented the innovation layer: C1b self-audit battery,
   C3b hypothesis-ledger evidence, and the C4b generated-feature vertical
   slice, filling the B6/D3/D4 stubs to their Appendix A.2/A.3 reference
