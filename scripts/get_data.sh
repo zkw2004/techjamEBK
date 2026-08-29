@@ -6,7 +6,9 @@
 # a stable Zenodo DOI, so fetching beats committing.
 set -euo pipefail
 
-ARCHIVE_SHA256="c814bf6f3624c0cfae83c57de3df26b2ed206e5c57bab4c4dcbfabbabe20cbf0"
+# Public checksum of the organiser archive, not a credential — the high
+# entropy trips detect-secrets, so it is allowlisted inline.
+ARCHIVE_SHA256="c814bf6f3624c0cfae83c57de3df26b2ed206e5c57bab4c4dcbfabbabe20cbf0"  # pragma: allowlist secret
 URL="https://zenodo.org/records/10439422/files/KuaiRand-Pure.tar.gz"
 
 cd "$(dirname "$0")/.."
