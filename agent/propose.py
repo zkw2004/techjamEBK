@@ -43,7 +43,16 @@ _client: Any | None = None
 
 
 class ProposeError(RuntimeError):
-    """The LLM could not produce a usable Action."""
+    """The LLM could not produce a usable Action.
+
+    ``usage`` is retained when the API returned a response that was billed but
+    whose Action could not be used. The loop can therefore log failed proposal
+    and repair calls without undercounting the run's token total.
+    """
+
+    def __init__(self, message: str, *, usage: dict | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage or {}
 
 
 def set_client(client: Any | None) -> None:
@@ -147,6 +156,23 @@ def check_action_consistency(action: Action) -> None:
             raise ProposeError("type='blend' requires at least two parents")
 
 
+def check_repair_consistency(original: Action, repaired: Action) -> None:
+    """Enforce the repair prompt's evidence-preservation contract in code.
+
+    A repair may change the mechanism that failed, but changing the claim or
+    branch metadata turns it into a different experiment. Prompt instructions
+    are not a sufficient trust boundary, so these three fields are checked
+    after structured parsing as well.
+    """
+    for field in ("hypothesis", "family", "parent"):
+        before = getattr(original, field)
+        after = getattr(repaired, field)
+        if after != before:
+            raise ProposeError(
+                f"repair must preserve {field}: expected {before!r}, got {after!r}"
+            )
+
+
 def _call(model: str, system: list[dict], user: str, **kwargs: Any) -> Any:
     client = _get_client()
     try:
@@ -189,6 +215,7 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
 
     total = {"in": 0, "out": 0, "model": PROPOSE_MODEL, "cache_read": 0, "cache_write": 0}
     last_error: str | None = None
+    rejected_action: Action | None = None
 
     for _attempt in range(MAX_ATTEMPTS):
         prompt = user
@@ -197,6 +224,8 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
                 f"\n\nYour previous proposal was rejected: {last_error}\n"
                 "Return a corrected Action. Keep the same hypothesis."
             )
+            if rejected_action is not None:
+                prompt += "\n\nRejected Action:\n" + rejected_action.model_dump_json(indent=2)
 
         response = _call(
             PROPOSE_MODEL, system, prompt, thinking={"type": "adaptive"}
@@ -209,16 +238,24 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
         if action is None:
             last_error = "response did not contain a parseable Action"
             continue
+        if rejected_action is not None and action.hypothesis != rejected_action.hypothesis:
+            last_error = (
+                "corrected Action changed the hypothesis from "
+                f"{rejected_action.hypothesis!r} to {action.hypothesis!r}"
+            )
+            continue
         try:
             check_action_consistency(action)
         except ProposeError as exc:
             last_error = str(exc)
+            rejected_action = action
             continue
         # Every attempt is billed, so report the running total, not the last call.
         return action, total
 
     raise ProposeError(
-        f"no valid Action after {MAX_ATTEMPTS} attempts; last error: {last_error}"
+        f"no valid Action after {MAX_ATTEMPTS} attempts; last error: {last_error}",
+        usage=total,
     )
 
 
@@ -252,6 +289,10 @@ def repair(action: Action, error: dict) -> tuple[Action, dict]:
 
     repaired = response.parsed_output
     if repaired is None:
-        raise ProposeError("repair returned no parseable Action")
-    check_action_consistency(repaired)
+        raise ProposeError("repair returned no parseable Action", usage=usage)
+    try:
+        check_action_consistency(repaired)
+        check_repair_consistency(action, repaired)
+    except ProposeError as exc:
+        raise ProposeError(str(exc), usage=usage) from exc
     return repaired, usage

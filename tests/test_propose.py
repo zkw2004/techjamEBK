@@ -197,18 +197,19 @@ def test_valid_action_passes_consistency():
 # --- retry behaviour --------------------------------------------------------
 
 def test_inconsistent_proposal_is_re_asked_once_then_succeeds():
-    bad = Action(hypothesis="h", reasoning="r", type="tune", family="training",
+    bad = Action(hypothesis=VALID_ACTION.hypothesis, reasoning="r", type="tune", family="training",
                  parent="n001", search_space=None)
     client = fake([(bad, USAGE), (VALID_ACTION, USAGE)])
     action, usage = P.propose(HISTORY, "knowledge", PARENT)
     assert action is VALID_ACTION
     assert len(client.messages.calls) == 2
     assert "search_space" in client.messages.calls[1]["messages"][0]["content"]
+    assert bad.hypothesis in client.messages.calls[1]["messages"][0]["content"]
 
 
 def test_retry_usage_is_summed_not_overwritten():
     """Both attempts are billed, so both must reach the resource report."""
-    bad = Action(hypothesis="h", reasoning="r", type="code", family="feature",
+    bad = Action(hypothesis=VALID_ACTION.hypothesis, reasoning="r", type="code", family="feature",
                  parent="n001", code=None)
     fake([(bad, USAGE), (VALID_ACTION, USAGE)])
     _, usage = P.propose(HISTORY, "knowledge", PARENT)
@@ -220,7 +221,18 @@ def test_gives_up_after_max_attempts():
     bad = Action(hypothesis="h", reasoning="r", type="code", family="feature",
                  parent="n001", code=None)
     fake([(bad, USAGE)] * P.MAX_ATTEMPTS)
-    with pytest.raises(P.ProposeError, match="no valid Action"):
+    with pytest.raises(P.ProposeError, match="no valid Action") as exc:
+        P.propose(HISTORY, "knowledge", PARENT)
+    assert exc.value.usage["in"] == P.MAX_ATTEMPTS * USAGE["input_tokens"]
+    assert exc.value.usage["out"] == P.MAX_ATTEMPTS * USAGE["output_tokens"]
+
+
+def test_schema_retry_cannot_silently_change_the_hypothesis():
+    bad = Action(hypothesis="original claim", reasoning="r", type="code",
+                 family="feature", parent="n001", code=None)
+    changed = VALID_ACTION.model_copy(update={"hypothesis": "different claim"})
+    fake([(bad, USAGE), (changed, USAGE)])
+    with pytest.raises(P.ProposeError, match="changed the hypothesis"):
         P.propose(HISTORY, "knowledge", PARENT)
 
 
@@ -228,6 +240,32 @@ def test_api_failure_becomes_a_propose_error_not_a_raw_exception():
     fake([(RuntimeError("connection reset"), USAGE)])
     with pytest.raises(P.ProposeError, match="connection reset"):
         P.propose(HISTORY, "knowledge", PARENT)
+
+
+# --- repair invariants ------------------------------------------------------
+
+@pytest.mark.parametrize("field", ["hypothesis", "family", "parent"])
+def test_repair_cannot_change_experiment_identity(field):
+    replacements = {
+        "hypothesis": "a different claim",
+        "family": "training",
+        "parent": "n999",
+    }
+    changed = VALID_ACTION.model_copy(update={field: replacements[field]})
+    fake([(changed, USAGE)])
+    with pytest.raises(P.ProposeError, match=f"preserve {field}") as exc:
+        P.repair(VALID_ACTION, {"error_class": "syntax"})
+    assert exc.value.usage["in"] == USAGE["input_tokens"]
+
+
+def test_repair_may_change_mechanism_without_changing_claim():
+    repaired = VALID_ACTION.model_copy(
+        update={"config": VALID_ACTION.config.model_copy(update={"loss": "pointwise"})}
+    )
+    fake([(repaired, USAGE)])
+    result, _ = P.repair(VALID_ACTION, {"error_class": "schema"})
+    assert result.config.loss == "pointwise"
+    assert result.hypothesis == VALID_ACTION.hypothesis
 
 
 # --- prompt files -----------------------------------------------------------
