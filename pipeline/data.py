@@ -1,7 +1,8 @@
-"""Fixed splits, expanding internal folds, date-order assertions.
+"""Fixed splits, expanding internal folds, date-order assertions,
+negative-sampling strategies.
 
 Contract: AGENT_PLAN.md Section 8.2 (FROZEN — do not rename or restructure).
-Owner: Workstream B (Malvika). Tasks B1, B2.
+Owner: Workstream B (Malvika). Tasks B1, B2, B7.
 
 Trap 1 (Section 11) lives here: never shuffle, never k-fold, never re-split.
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from pandas import DataFrame  # swap to polars if that is the Day-0 decision
 
@@ -152,3 +154,170 @@ def internal_folds() -> list[tuple[DataFrame, DataFrame]]:
         folds.append((fold_train, fold_val))
 
     return folds
+
+
+# --- Negative sampling (Section 6.5, B7) -------------------------------------
+#
+# "Which non-clicks to train against" is its own axis, independent of model
+# class and loss framing (Section 6.5): Config.negative_sampling selects one
+# of three strategies for which negative (LABEL == 0) rows join every
+# positive row in a training frame. KuaiRand ships no explicit session id,
+# so `tab` (the app tab/scenario, Section 6.8) is the closest real signal to
+# a feed-context boundary and stands in for one here — documented, not
+# invented: it is one of the five official FIELDS already in FM.fit()'s path.
+NEGATIVE_SAMPLING_STRATEGIES = ("all", "in_session", "pop_weighted")
+
+# BPR and similar pairwise setups commonly sample a handful of negatives per
+# positive rather than one; 4 is a conventional starting point. Screen
+# alternatives on the internal folds (6.2), never on the official validation
+# window — same rule as alpha and half-life in B5.
+DEFAULT_NEGATIVES_PER_POSITIVE = 4.0
+
+
+def _positions(mask: pd.Series) -> np.ndarray:
+    """0-based row positions where a boolean Series is True, in row order."""
+    return np.flatnonzero(mask.to_numpy())
+
+
+def _sample_in_session_negatives(
+    train_df: DataFrame,
+    positive_mask: pd.Series,
+    negatives_per_positive: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Positions of negatives sharing a (user_id, date, tab) session with at
+    least one of that user's positives, capped per user at
+    `negatives_per_positive * that user's positive count`."""
+    frame = pd.DataFrame(
+        {
+            "_position": np.arange(len(train_df)),
+            "_user_id": train_df["user_id"].to_numpy(),
+            "_session": list(
+                zip(
+                    train_df["user_id"].to_numpy(),
+                    train_df["date"].to_numpy(),
+                    train_df["tab"].to_numpy(),
+                    strict=True,
+                )
+            ),
+            "_is_positive": positive_mask.to_numpy(),
+        }
+    )
+    positives = frame.loc[frame["_is_positive"]]
+    positive_sessions_by_user = positives.groupby("_user_id")["_session"].apply(set)
+    positive_counts_by_user = positives.groupby("_user_id").size()
+
+    selected: list[int] = []
+    negatives = frame.loc[~frame["_is_positive"]]
+    for user_id, group in negatives.groupby("_user_id", sort=False):
+        sessions = positive_sessions_by_user.get(user_id)
+        if not sessions:
+            continue
+        eligible = group.loc[group["_session"].isin(sessions), "_position"].to_numpy()
+        if len(eligible) == 0:
+            continue
+        budget = int(round(negatives_per_positive * positive_counts_by_user[user_id]))
+        if budget <= 0:
+            continue
+        if len(eligible) > budget:
+            eligible = rng.choice(eligible, size=budget, replace=False)
+        selected.extend(eligible.tolist())
+    return np.asarray(selected, dtype=np.int64)
+
+
+def _sample_pop_weighted_negatives(
+    train_df: DataFrame,
+    positive_mask: pd.Series,
+    negatives_per_positive: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Positions of negatives drawn without replacement from the whole
+    frame, weighted by each row's video's training-set impression count.
+
+    A popular-but-unclicked video is a harder, more informative negative
+    than a uniformly drawn one (Section 6.5) — the inverse of down-weighting:
+    popular items are *favoured* as negatives, not penalised.
+    """
+    negative_positions = _positions(~positive_mask)
+    n_positive = int(positive_mask.sum())
+    budget = min(int(round(negatives_per_positive * n_positive)), len(negative_positions))
+    if budget <= 0:
+        return np.asarray([], dtype=np.int64)
+
+    video_ids = train_df["video_id"].to_numpy()
+    video_counts = pd.Series(video_ids).value_counts()
+    weights = pd.Series(video_ids[negative_positions]).map(video_counts).to_numpy(dtype=np.float64)
+    weight_total = weights.sum()
+    probabilities = weights / weight_total if weight_total > 0 else None
+
+    chosen = rng.choice(negative_positions, size=budget, replace=False, p=probabilities)
+    return np.sort(chosen)
+
+
+def sample_negatives(
+    train_df: DataFrame,
+    strategy: str = "all",
+    negatives_per_positive: float = DEFAULT_NEGATIVES_PER_POSITIVE,
+    seed: int = 42,
+) -> DataFrame:
+    """Select which negative rows join every positive row in training.
+
+    Every positive row (`LABEL == 1`) is always kept. Which negative rows
+    (`LABEL == 0`) join them depends on `strategy` (Config.negative_sampling,
+    Section 8.6):
+
+    - `"all"` (default): every negative impression is kept, in original row
+      order — plain pointwise training over the whole frame.
+      `negatives_per_positive` is ignored.
+    - `"in_session"`: a negative is eligible only if it shares a
+      (user_id, date, tab) session with at least one of that same user's
+      positives; up to `negatives_per_positive` are then sampled uniformly
+      per user, without replacement.
+    - `"pop_weighted"`: negatives are drawn without replacement from the
+      whole frame, `negatives_per_positive` per positive overall, with
+      inclusion probability proportional to each negative's video's
+      training-set impression count.
+
+    Sampling is seeded and therefore reproducible for a fixed `train_df`.
+    Returns a new frame in ascending original-row-order (never mutates
+    `train_df`, never reorders — matching B1's row-order contract). Raises
+    `ValueError` for an unrecognised strategy, a non-positive
+    `negatives_per_positive`, an empty `train_df`, or a `train_df` missing a
+    column the chosen strategy requires.
+    """
+    if strategy not in NEGATIVE_SAMPLING_STRATEGIES:
+        raise ValueError(
+            f"unknown negative_sampling strategy {strategy!r}; "
+            f"expected one of {NEGATIVE_SAMPLING_STRATEGIES}"
+        )
+    if negatives_per_positive <= 0:
+        raise ValueError("negatives_per_positive must be positive")
+    if train_df.empty:
+        raise ValueError("cannot sample negatives from an empty training frame")
+    if LABEL not in train_df.columns:
+        raise ValueError(f"train_df is missing the label column {LABEL!r}")
+
+    if strategy == "all":
+        return train_df.copy()
+
+    required = {
+        "in_session": ("user_id", "date", "tab"),
+        "pop_weighted": ("video_id",),
+    }[strategy]
+    for column in required:
+        if column not in train_df.columns:
+            raise ValueError(f"{strategy!r} negative sampling requires a {column!r} column")
+
+    positive_mask = train_df[LABEL].astype(bool)
+    rng = np.random.default_rng(seed)
+    if strategy == "in_session":
+        negative_positions = _sample_in_session_negatives(
+            train_df, positive_mask, negatives_per_positive, rng
+        )
+    else:
+        negative_positions = _sample_pop_weighted_negatives(
+            train_df, positive_mask, negatives_per_positive, rng
+        )
+
+    keep_positions = np.union1d(_positions(positive_mask), negative_positions)
+    return train_df.iloc[keep_positions].copy()
