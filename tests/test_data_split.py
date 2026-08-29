@@ -5,25 +5,31 @@ from __future__ import annotations
 
 import pytest
 
-from pipeline.data import N_TEST, N_TRAIN, N_VAL
+from pipeline.data import DATA_DIR, N_TEST, N_TRAIN, N_VAL
+
+DATA_AVAILABLE = (DATA_DIR / "video_features_basic_pure.csv").is_file()
+requires_data = pytest.mark.skipif(not DATA_AVAILABLE, reason="KuaiRand dataset is not installed")
 
 
 def test_split_constants_match_the_brief():
     assert (N_TRAIN, N_VAL, N_TEST) == (1_141_112, 124_909, 170_588)
 
 
+@requires_data
 def test_row_counts_exact():
     from pipeline.data import load
     train, val, test = load()
     assert (len(train), len(val), len(test)) == (N_TRAIN, N_VAL, N_TEST)
 
 
+@requires_data
 def test_dates_are_strictly_ordered_across_splits():
     from pipeline.data import load
     train, val, test = load()
     assert train["date"].max() < val["date"].min() < test["date"].min()
 
 
+@requires_data
 def test_assertion_fires_if_splits_swapped():
     """Hand the order check a val/train swap and it must raise, not warn."""
     from pipeline.data import _assert_split_order, load
@@ -33,12 +39,13 @@ def test_assertion_fires_if_splits_swapped():
     with pytest.raises(AssertionError):
         _assert_split_order(val, train, test)
 
+@requires_data
 def test_row_order_matches_starter_kit():
     """row_id is a positional index into the split; any reordering breaks
     submission alignment (trap 4)."""
     import importlib.util
 
-    from pipeline.data import DATA_DIR, load
+    from pipeline.data import load
 
     spec = importlib.util.spec_from_file_location(
         "starter_data",
