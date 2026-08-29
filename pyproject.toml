@@ -1,0 +1,38 @@
+[project]
+name = "techjam-recsys-agent"
+version = "0.1.0"
+description = "Autonomous ML research agent for recommender systems — TechJam 2026, Track 2"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "polars",
+    "lightgbm",
+    "torch",
+    "optuna",
+    "anthropic",
+    "pydantic>=2",
+    "rich",
+    "jinja2",
+    "matplotlib",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff", "pre-commit", "detect-secrets"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pipeline", "agent", "tools"]

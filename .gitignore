@@ -1,0 +1,32 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# data — never committed (organiser archive, ~1.4M rows)
+data/
+*.csv
+!logs/**/*.csv
+submissions/*.csv
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# optuna / experiment scratch
+*.db
+*.sqlite3
+.optuna/
+
+# os / editor
+.DS_Store
+.idea/
+.vscode/
+
+# organiser starter kit — vendored, see pipeline/README_STARTER_KIT.md
+kuairand-starter-kit/*.tar.gz
