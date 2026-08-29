@@ -37,7 +37,10 @@ LOG_FILES = (
     "log_standard_4_22_to_5_08_pure.csv",
 )
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+# `make data` extracts the organiser archive to this exact location.  Keep the
+# raw dataset outside version control, but make the local loader agree with the
+# documented layout rather than looking for CSVs directly under `data/`.
+DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "KuaiRand-Pure" / "data"
 
 # Randomised-exposure log: 1.18M rows dated 2022-04-22 to 2022-05-08, i.e.
 # ENTIRELY after the training cutoff. Usable as an unbiased validation set
