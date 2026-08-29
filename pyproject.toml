@@ -2,13 +2,18 @@
 name = "techjam-recsys-agent"
 version = "0.1.0"
 description = "Autonomous ML research agent for recommender systems — TechJam 2026, Track 2"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
-    "numpy",
+    # Torch 2.2's macOS Intel build predates NumPy 2's array ABI.
+    "numpy<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "numpy; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "pandas",
     "polars",
     "lightgbm",
-    "torch",
+    # PyTorch stopped publishing macOS Intel wheels after 2.2.2. Keep that
+    # supported release on x86_64 Macs and use the current resolver elsewhere.
+    "torch==2.2.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "torch; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "optuna",
     "anthropic",
     "pydantic>=2",

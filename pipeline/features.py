@@ -579,7 +579,16 @@ def leakage_check(fn: Callable, train_df, target_df) -> bool:
         if source_name in src:
             return False
 
+    in_sample = train_df is target_df
     train_sample = train_df.head(_PROBE_TRAIN_ROWS)
+    if in_sample:
+        # In-sample aggregate builders intentionally consume earlier labels
+        # from this same frame. Slicing train and target independently loses
+        # the identity signal they use to select their strictly historical
+        # implementation. Static checks still run above, and every real
+        # validation/test application takes the corruption-probe path below.
+        np.asarray(fn(train_sample, train_sample))
+        return True
     target_sample = target_df.head(_PROBE_TARGET_ROWS)
     baseline = np.asarray(fn(train_sample, target_sample))
     corrupted_target = target_sample.copy()

@@ -33,16 +33,36 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 
 ## Model priors
 
-- **FM** — TODO (D6)
-- **DeepFM** — TODO
-- **LightGBM lambdarank** — TODO
-- **Multi-task heads** — TODO
-- **BPR / pairwise** — TODO
-- **Negative sampling** — TODO
-- **Time decay** — TODO
-- **Empirical-Bayes smoothing** — TODO
-- **Exposure debiasing (randomised slice)** — TODO
-- **Blending** — TODO
+- **FM** — Use low-dimensional embeddings to model sparse user-item and
+  context interactions cheaply; it is the official baseline and the first
+  trustworthy parent for feature experiments.
+- **DeepFM** — Add an MLP over the same embeddings when higher-order feature
+  interactions appear useful, but keep the model small and verify the gain
+  against a well-tuned FM.
+- **LightGBM lambdarank** — Use per-user groups so the objective optimises
+  within-user ranking; without the correct group array it does not match GAUC
+  or nDCG and the result is invalid.
+- **Multi-task heads** — Predict legal auxiliary feedback signals only as
+  training targets to enrich shared embeddings, while using only the
+  `long_view` head at inference.
+- **BPR / pairwise** — Compare a positive impression with sampled negatives
+  from the same user's eligible history when a ranking-aligned objective may
+  outperform pointwise BCE.
+- **Negative sampling** — Treat which non-clicked impressions are retained as
+  an experiment axis: all negatives are faithful, while in-session and
+  popularity-weighted negatives can focus learning on harder comparisons.
+- **Time decay** — Weight recent historical events more heavily because user
+  interests and item popularity drift, fitting the half-life on internal
+  temporal folds only.
+- **Empirical-Bayes smoothing** — Shrink sparse group rates toward the global
+  rate with `(clicks + alpha * global_rate) / (impressions + alpha)`, fitting
+  `alpha` on internal folds only.
+- **Exposure debiasing (randomised slice)** — Use the randomised-exposure log
+  for unbiased diagnostics or IPS only when its propensity and temporal
+  assumptions are satisfied; post-training-cutoff rows never enter fitting.
+- **Blending** — Rank-average continuous predictions from accepted,
+  sufficiently diverse parents; skip near-identical models and reject a blend
+  unless it beats both parents on internal folds and official validation.
 
 ## Cautions from the literature
 

@@ -235,7 +235,13 @@ def _fit_and_predict(
         validation_matrix = _matrix(train_frame, validation_frame, features)
         validation_labels = _column(validation_frame, LABEL)
 
-    model.fit(train_matrix, train_labels, validation_matrix, validation_labels)
+    groups = None
+    if config["model"] == "lgbm" and config["loss"] == "lambdarank":
+        groups = {
+            "train": _column(train_frame, "user_id"),
+            "val": None if validation_frame is None else _column(validation_frame, "user_id"),
+        }
+    model.fit(train_matrix, train_labels, validation_matrix, validation_labels, groups=groups)
     if fit_summaries is not None:
         fit_summaries.append({"best_epoch": getattr(model, "best_epoch", None)})
     outputs = []
