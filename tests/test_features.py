@@ -214,6 +214,34 @@ def test_historical_features_reject_overlapping_target_window(
             feature_module.get(name)(aggregate_train_df, overlapping_target)
 
 
+def test_historical_features_build_leak_safe_in_sample_history_by_timestamp():
+    """Training features use only events strictly before each impression."""
+    frame = pd.DataFrame(
+        {
+            # Deliberately unsorted: original CSV position is not time order.
+            "time_ms": [300, 100, 200, 200, 400],
+            "date": [20220408] * 5,
+            "user_id": ["u1", "u1", "u1", "u2", "u1"],
+            "video_id": ["v1", "v2", "v1", "v1", "v3"],
+            "tag": ["10", "20", "10", "10", "20"],
+            "long_view": [1, 0, 1, 1, 0],
+        }
+    )
+
+    np.testing.assert_allclose(feature_module.user_ctr(frame, frame), [0.5, 0.5, 0, 0, 2 / 3])
+    np.testing.assert_allclose(feature_module.video_ctr(frame, frame), [1, 0.5, 0, 0, 0.75])
+    np.testing.assert_allclose(feature_module.video_impressions(frame, frame), [2, 0, 0, 0, 0])
+    np.testing.assert_allclose(feature_module.user_activity(frame, frame), [2, 0, 1, 0, 3])
+    np.testing.assert_allclose(
+        feature_module.user_tag_affinity(frame, frame), [1, 0.5, 0, 0, 0]
+    )
+
+
+def test_in_sample_historical_features_require_an_event_timestamp(aggregate_train_df):
+    with pytest.raises(ValueError, match="time_ms"):
+        feature_module.user_ctr(aggregate_train_df, aggregate_train_df)
+
+
 def test_rate_features_accept_numeric_string_training_labels(
     aggregate_train_df,
     aggregate_target_df,
