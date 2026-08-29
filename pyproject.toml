@@ -16,6 +16,12 @@ dependencies = [
     "matplotlib",
 ]
 
+# Mirrored intentionally: uv reads [dependency-groups] (PEP 735), while
+# `pip install -e ".[dev]"` needs [project.optional-dependencies]. Keep the
+# two lists in sync.
+[project.optional-dependencies]
+dev = ["pytest", "ruff", "pre-commit", "detect-secrets"]
+
 [dependency-groups]
 dev = ["pytest", "ruff", "pre-commit", "detect-secrets"]
 
@@ -26,6 +32,14 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Never linted, never formatted: these are the organiser's files. evaluate.py
+# and submit.py are the scoring ground truth and are hashed into every run
+# manifest (Section 8.3) — a lint autofix would break preflight.
+extend-exclude = [
+    "kuairand-starter-kit",
+    "pipeline/evaluate.py",
+    "pipeline/submit.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

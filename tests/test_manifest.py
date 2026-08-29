@@ -4,7 +4,6 @@ preflight closed; every node carries the manifest hash."""
 from __future__ import annotations
 
 from agent.manifest import BASELINE_SEED_STD, BASELINE_VALIDATION, CONVERGENCE, SUBMISSION
-
 from tests.conftest import todo
 
 

@@ -4,7 +4,6 @@ row order matches the starter kit."""
 from __future__ import annotations
 
 from pipeline.data import N_TEST, N_TRAIN, N_VAL
-
 from tests.conftest import todo
 
 

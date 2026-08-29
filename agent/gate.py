@@ -10,8 +10,6 @@ through (Section 5.3).
 
 from __future__ import annotations
 
-import numpy as np
-
 BASELINE_SEED_STD = 0.0008  # anything smaller than ~2x this is not an improvement
 MIN_DELTA_FLOOR = 0.002
 
