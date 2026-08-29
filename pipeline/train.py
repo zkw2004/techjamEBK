@@ -165,7 +165,14 @@ def _matrix(train_frame, target_frame, feature_names: list[str]) -> np.ndarray:
 
     columns = []
     for name in feature_names:
-        if name in FIELDS and _has_column(target_frame, name):
+        if name == "dur_bucket" and not _has_column(target_frame, name):
+            train_durations = np.asarray(_column(train_frame, "duration_ms"), dtype=float)
+            target_durations = np.asarray(_column(target_frame, "duration_ms"), dtype=float)
+            if not np.isfinite(train_durations).all() or not np.isfinite(target_durations).all():
+                raise ValueError("duration_ms must contain only finite numbers")
+            edges = np.quantile(train_durations, np.linspace(0, 1, 11)[1:-1])
+            values = np.searchsorted(edges, target_durations)
+        elif name in FIELDS and _has_column(target_frame, name):
             values = _column(target_frame, name)
         else:
             builder = get_feature(name)
@@ -204,6 +211,7 @@ def _fit_and_predict(
     validation_frame,
     prediction_frames: list,
     seed: int,
+    fit_summaries: list[dict] | None = None,
 ) -> list[np.ndarray]:
     from pipeline.data import LABEL
 
@@ -219,6 +227,8 @@ def _fit_and_predict(
         validation_labels = _column(validation_frame, LABEL)
 
     model.fit(train_matrix, train_labels, validation_matrix, validation_labels)
+    if fit_summaries is not None:
+        fit_summaries.append({"best_epoch": getattr(model, "best_epoch", None)})
     outputs = []
     for frame in prediction_frames:
         scores = np.asarray(model.predict(_matrix(train_frame, frame, features)), dtype=float)
@@ -285,10 +295,14 @@ def _run_smoke(config: dict, seed: int) -> dict:
     )
 
 
-def _score_folds(config: dict, seed: int) -> tuple[list[dict[str, float]], np.ndarray, np.ndarray]:
+def _score_folds(
+    config: dict,
+    seed: int,
+) -> tuple[list[dict[str, float]], np.ndarray, np.ndarray, list[int]]:
     metrics = []
     all_scores = []
     all_user_ids = []
+    fit_summaries = []
     folds = _load_folds()
     if len(folds) != 3:
         raise ValueError(f"screen requires exactly three internal folds, got {len(folds)}")
@@ -299,11 +313,17 @@ def _score_folds(config: dict, seed: int) -> tuple[list[dict[str, float]], np.nd
             fold_validation,
             [fold_validation],
             seed + index,
+            fit_summaries,
         )
         metrics.append(_evaluate(fold_validation, scores))
         all_scores.append(scores)
         all_user_ids.append(_column(fold_validation, "user_id"))
-    return metrics, np.concatenate(all_scores), np.concatenate(all_user_ids)
+    best_epochs = [
+        summary["best_epoch"]
+        for summary in fit_summaries
+        if isinstance(summary.get("best_epoch"), int) and summary["best_epoch"] > 0
+    ]
+    return metrics, np.concatenate(all_scores), np.concatenate(all_user_ids), best_epochs
 
 
 def _mean_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
@@ -324,7 +344,7 @@ def _screen_config(config: dict) -> dict:
 
 
 def _run_screen(config: dict, seed: int) -> dict:
-    fold_metrics, scores, user_ids = _score_folds(_screen_config(config), seed)
+    fold_metrics, scores, user_ids, _ = _score_folds(_screen_config(config), seed)
     return _success(
         "screen",
         **_mean_metrics(fold_metrics),
@@ -334,11 +354,64 @@ def _run_screen(config: dict, seed: int) -> dict:
     )
 
 
+def _quartile_labels(counts_by_key, keys) -> np.ndarray:
+    """1-based quartile of each row's key, by the train-side count distribution."""
+    per_key_counts = np.asarray(list(counts_by_key.values()), dtype=float)
+    edges = np.quantile(per_key_counts, [0.25, 0.5, 0.75])
+    row_counts = np.asarray([counts_by_key.get(key, 0) for key in keys], dtype=float)
+    return np.searchsorted(edges, row_counts, side="right") + 1
+
+
+def _segment_metrics(train_frame, validation_frame, scores: np.ndarray) -> dict:
+    """Primary by user-activity quartile, item-popularity quartile, and day (6.6).
+
+    Returns {} when the frames do not carry the meta columns (synthetic test
+    fixtures); on the real split all three breakdowns populate. Quartiles are
+    fitted on the TRAIN side only, so segment membership is knowable before
+    the impression.
+    """
+    from pipeline.data import LABEL
+
+    needed = ("user_id", "video_id", "date", LABEL)
+    if not all(_has_column(frame, name) for frame in (train_frame, validation_frame)
+               for name in needed):
+        return {}
+    from collections import Counter
+
+    from agent.gate import segments as gate_segments
+
+    user_counts = Counter(_column(train_frame, "user_id").tolist())
+    video_counts = Counter(_column(train_frame, "video_id").tolist())
+    validation_users = _column(validation_frame, "user_id")
+    validation_videos = _column(validation_frame, "video_id")
+    dates = _column(validation_frame, "date")
+    day_index = {value: i + 1 for i, value in enumerate(sorted(set(dates.tolist())))}
+    meta = {
+        "labels": _column(validation_frame, LABEL),
+        "activity_q": _quartile_labels(user_counts, validation_users.tolist()),
+        "pop_q": _quartile_labels(video_counts, validation_videos.tolist()),
+        "day": np.asarray([day_index[value] for value in dates.tolist()]),
+    }
+    try:
+        return gate_segments(scores, validation_users, meta)
+    except NotImplementedError:  # D4 reverted — segments stay empty, runs stay alive
+        return {}
+
+
 def _run_full(config: dict, seed: int) -> dict:
-    fold_metrics, _, _ = _score_folds(config, seed)
+    fold_metrics, _, _, best_epochs = _score_folds(config, seed)
+    refit_config = config
+    if best_epochs:
+        refit_config = {
+            **config,
+            "hparams": {
+                **config["hparams"],
+                "max_epochs": int(np.median(best_epochs)),
+            },
+        }
     train_frame, validation_frame, test_frame = _load_data()
     validation_scores, test_scores = _fit_and_predict(
-        config,
+        refit_config,
         train_frame,
         None,
         [validation_frame, test_frame],
@@ -349,6 +422,7 @@ def _run_full(config: dict, seed: int) -> dict:
         "full",
         **metrics,
         fold_primaries=[item["primary"] for item in fold_metrics],
+        segments=_segment_metrics(train_frame, validation_frame, validation_scores),
         val_scores=validation_scores,
         val_user_ids=_column(validation_frame, "user_id"),
         test_scores=test_scores,
@@ -368,10 +442,16 @@ def _run_confirm(config: dict, seed: int) -> dict:
     fold_primaries = np.mean(
         np.asarray([run["fold_primaries"] for run in runs], dtype=float), axis=0
     ).tolist()
+    segment_keys = sorted({key for run in runs for key in run["segments"]})
+    mean_segments = {
+        key: float(np.mean([run["segments"][key] for run in runs if key in run["segments"]]))
+        for key in segment_keys
+    }
     return _success(
         "confirm",
         **metrics,
         fold_primaries=fold_primaries,
+        segments=mean_segments,
         val_scores=np.mean([run["val_scores"] for run in runs], axis=0),
         val_user_ids=runs[0]["val_user_ids"],
         test_scores=np.mean([run["test_scores"] for run in runs], axis=0),

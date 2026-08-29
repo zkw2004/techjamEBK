@@ -16,15 +16,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pipeline.data import DATA_DIR
+from pipeline.data import DATA_DIR, FIELDS, LABEL
 from pipeline.models import MODEL_REGISTRY
+from pipeline.models.fm import BASELINE_VALIDATION_PRIMARY, FM
 from pipeline.models.popularity import (
     POPULARITY_REFERENCE,
     RANDOM_REFERENCE,
     PopularityModel,
     RandomModel,
 )
-from tests.conftest import todo
 
 EXPECTED_MODELS = {"random", "popularity", "fm", "lgbm", "deepfm", "deepfm_mtl", "blend"}
 
@@ -141,9 +141,61 @@ def test_popularity_reproduces_reference_primary():
     assert metrics["primary"] == pytest.approx(POPULARITY_REFERENCE["valid"], abs=0.0008)
 
 
-@todo("C3")
+def test_fm_learns_to_rank_repeated_positive_pattern_above_negative_pattern():
+    positive = ["u1", "v1", "a1", "home", "1"]
+    negative = ["u2", "v2", "a2", "search", "8"]
+    X_train = np.asarray([positive] * 20 + [negative] * 20, dtype=object)
+    y_train = np.asarray([1] * 20 + [0] * 20, dtype=float)
+    model = FM(k=4, lr=0.05, max_epochs=20, batch_size=8, patience=4, seed=3)
+
+    model.fit(X_train, y_train, None, None)
+    scores = model.predict(np.asarray([positive, negative], dtype=object))
+
+    assert scores[0] > scores[1]
+
+
+def test_fm_training_is_deterministic_and_unseen_categories_are_supported():
+    X_train = np.asarray(
+        [
+            ["u1", "v1", "a1", "home", "1"],
+            ["u1", "v2", "a2", "home", "2"],
+            ["u2", "v1", "a1", "search", "1"],
+            ["u2", "v2", "a2", "search", "2"],
+        ],
+        dtype=object,
+    )
+    y_train = np.asarray([1, 0, 0, 1], dtype=float)
+    target = np.asarray([["new-user", "new-video", "new-author", "new-tab", "9"]])
+    models = [FM(k=2, lr=0.01, max_epochs=2, batch_size=2, seed=11) for _ in range(2)]
+
+    for model in models:
+        model.fit(X_train, y_train, None, None)
+
+    first = models[0].predict(target)
+    second = models[1].predict(target)
+    np.testing.assert_array_equal(first, second)
+    assert first.shape == (1,)
+    assert np.isfinite(first).all()
+
+
+@requires_kuairand_data
 def test_fm_reproduces_baseline_validation_primary():
     """0.6016 within one seed-std (0.0008)."""
+    from pipeline.evaluate import evaluate
+    from pipeline.train import _matrix
+
+    train, validation = _reference_frames()
+    model = FM(seed=0)
+    model.fit(
+        _matrix(train, train, FIELDS),
+        train[LABEL].to_numpy(),
+        _matrix(train, validation, FIELDS),
+        validation[LABEL].to_numpy(),
+    )
+    scores = model.predict(_matrix(train, validation, FIELDS))
+    metrics = evaluate(validation["user_id"].to_numpy(), validation[LABEL].to_numpy(), scores)
+
+    assert metrics["primary"] == pytest.approx(BASELINE_VALIDATION_PRIMARY, abs=0.0008)
 
 
 def _successful_tier(config, fidelity, seed):

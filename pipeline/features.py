@@ -234,15 +234,154 @@ def decay_weights(dates, cutoff, half_life_days: float = 7.0) -> np.ndarray:
     raise NotImplementedError("B5")
 
 
+# --- Leakage guard (B6, Appendix A.2) ---------------------------------------
+
+_PROBE_TRAIN_ROWS = 2_000
+_PROBE_TARGET_ROWS = 1_000
+_PROBE_SEED = 20220429  # first hidden-test day; fixed so the guard is deterministic
+
+
+def _frame_length(frame) -> int:
+    if hasattr(frame, "__len__") and not isinstance(frame, dict):
+        return len(frame)
+    lengths = {len(v) for v in frame.values()}
+    return lengths.pop() if lengths else 0
+
+
+def _frame_head(frame, rows: int):
+    if isinstance(frame, dict):
+        return {name: np.asarray(values)[:rows].copy() for name, values in frame.items()}
+    return frame.head(rows).copy()
+
+
+def _frame_columns(frame) -> tuple[str, ...]:
+    if isinstance(frame, dict):
+        return tuple(frame)
+    return tuple(getattr(frame, "columns", ()))
+
+
+def _with_shuffled(frame, columns: list[str], rng: np.random.Generator):
+    """Copy of `frame` with each named column independently permuted."""
+    if isinstance(frame, dict):
+        out = dict(frame)
+        for name in columns:
+            out[name] = rng.permutation(np.asarray(frame[name]))
+        return out
+    out = frame.copy()
+    for name in columns:
+        out[name] = rng.permutation(out[name].to_numpy())
+    return out
+
+
+def _feature_source(fn: Callable) -> str:
+    """Source text for the static scan. Fails closed when none is recoverable.
+
+    Generated features (exec'd from a code string) have no file for
+    `inspect.getsource`; the codegen path attaches the emitted source as
+    `fn.__leak_source__` so they stay auditable.
+    """
+    import inspect
+
+    source = getattr(fn, "__leak_source__", None)
+    if isinstance(source, str) and source.strip():
+        return source
+    try:
+        return inspect.getsource(fn)
+    except (OSError, TypeError) as exc:
+        raise ValueError(
+            "leakage_check requires the feature's source (a file-backed function "
+            "or a __leak_source__ attribute); refusing an unauditable feature"
+        ) from exc
+
+
+def _static_leak_scan(source: str) -> None:
+    """Reject source that reads the label or a post-exposure column off target_df."""
+    import re
+
+    for column in [LABEL, *FORBIDDEN_SAME_ROW]:
+        pattern = (
+            rf"""target_df\s*(?:\[\s*['"]{column}['"]"""
+            rf"""|\.{column}\b|\.get\(\s*['"]{column}['"])"""
+        )
+        match = re.search(pattern, source)
+        if match:
+            raise ValueError(
+                f"feature source reads same-row outcome {column!r} off target_df "
+                f"({match.group(0)!r}); post-exposure signals are never inputs (trap 2)"
+            )
+    for name in EXCLUDED_SOURCES:
+        if name in source:
+            raise ValueError(
+                f"feature source references excluded source {name!r}; its aggregation "
+                "window may span the test period (trap 3)"
+            )
+
+
+def _outputs_match(a: np.ndarray, b: np.ndarray) -> bool:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    return a.shape == b.shape and np.allclose(a, b, equal_nan=True)
+
+
 def leakage_check(fn: Callable, train_df, target_df) -> bool:
     """Static + probe leakage guard. See Appendix A.2. (B6)
 
-    1. Label-independence probe: shuffle train labels; if output is
+    1. Static source check: no target_df["long_view"], no FORBIDDEN_SAME_ROW
+       column read off target_df, no EXCLUDED_SOURCES. Fails closed when the
+       feature's source cannot be recovered.
+    2. Label-independence probe: shuffle train labels; if output is
        unchanged the feature is label-free (safe) or reading labels off
        target_df (unsafe) — the static check disambiguates.
-    2. Static source check: no target_df["long_view"], no FORBIDDEN_SAME_ROW
-       column read off target_df, no EXCLUDED_SOURCES.
+    3. Target-outcome probe: shuffle the label and every forbidden column
+       present on a target sample; any output change proves the feature is
+       reading same-row outcomes, however the read is spelled.
 
-    The third layer is the >0.75 primary canary inside run_experiment (C1).
+    Probes run on fixed-size head samples so the guard stays cheap on the
+    1.1M-row training frame. The final layer is the >0.75 primary canary
+    inside run_experiment (C1).
+
+    Raises ValueError (or lets a feature's own AssertionError propagate) on
+    a detected leak; returns True when every check passes.
     """
-    raise NotImplementedError("B6")
+    _static_leak_scan(_feature_source(fn))
+
+    train_sample = _frame_head(train_df, min(_frame_length(train_df), _PROBE_TRAIN_ROWS))
+    target_sample = _frame_head(target_df, min(_frame_length(target_df), _PROBE_TARGET_ROWS))
+    if _frame_length(train_sample) == 0 or _frame_length(target_sample) == 0:
+        return True
+    rng = np.random.default_rng(_PROBE_SEED)
+
+    baseline = np.asarray(fn(train_sample, target_sample), dtype=float)
+
+    # Probe 2 (informational, per A.2): label-dependence on the training side
+    # is legal — historical aggregates are supposed to use past labels.
+    if LABEL in _frame_columns(train_sample):
+        fn(_with_shuffled(train_sample, [LABEL], rng), target_sample)
+
+    # Probe 3: reading outcomes off the target rows is never legal.
+    outcome_columns = [
+        name
+        for name in (LABEL, *FORBIDDEN_SAME_ROW)
+        if name in _frame_columns(target_sample)
+    ]
+    if outcome_columns:
+        changed_columns: list[str] = []
+        shuffled_target = target_sample
+        for _ in range(8):  # a draw can coincidentally reproduce a short column
+            shuffled_target = _with_shuffled(target_sample, outcome_columns, rng)
+            changed_columns = [
+                name
+                for name in outcome_columns
+                if not _outputs_match(
+                    np.asarray(target_sample[name]), np.asarray(shuffled_target[name])
+                )
+            ]
+            if changed_columns:
+                break
+        if changed_columns and not _outputs_match(baseline, fn(train_sample, shuffled_target)):
+            raise ValueError(
+                "feature output changed when same-row outcomes "
+                f"{changed_columns!r} were permuted on target rows; it is reading "
+                "post-exposure signals (trap 2)"
+            )
+    return True

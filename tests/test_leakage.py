@@ -5,9 +5,16 @@ rejected; legitimate historical aggregates pass."""
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
+import pytest
 
-from pipeline.features import EXCLUDED_SOURCES, FORBIDDEN_SAME_ROW, LABEL
-from tests.conftest import todo
+from pipeline.features import (
+    EXCLUDED_SOURCES,
+    FORBIDDEN_SAME_ROW,
+    LABEL,
+    leakage_check,
+    user_ctr,
+)
 
 
 def test_label_matches_the_shipped_starter_kit():
@@ -39,24 +46,80 @@ def test_monthly_statistics_excluded_by_default():
     assert "item_statistics_monthly" in EXCLUDED_SOURCES
 
 
-@todo("B6")
+def _leak_frames():
+    train_df = pd.DataFrame(
+        {
+            "date": [20220408, 20220408, 20220409, 20220409, 20220410, 20220410],
+            "user_id": [1, 2, 1, 2, 1, 2],
+            "is_click": [1, 0, 0, 1, 1, 0],
+            LABEL: [1, 0, 1, 0, 0, 1],
+        }
+    )
+    target_df = pd.DataFrame(
+        {
+            "date": [20220422, 20220422, 20220423, 20220423],
+            "user_id": [1, 2, 1, 3],
+            "is_click": [0, 1, 1, 0],
+            LABEL: [1, 0, 0, 1],
+        }
+    )
+    return train_df, target_df
+
+
 def test_feature_reading_target_label_is_rejected():
-    """def bad(train_df, target_df): return target_df["long_view"].values"""
+    def bad(train_df, target_df):
+        return target_df["long_view"].to_numpy(dtype=float)
+
+    train_df, target_df = _leak_frames()
+    with pytest.raises(ValueError, match="post-exposure"):
+        leakage_check(bad, train_df, target_df)
 
 
-@todo("B6")
 def test_feature_reading_forbidden_same_row_column_is_rejected():
-    """def bad(train_df, target_df): return target_df["is_click"].values"""
+    def bad(train_df, target_df):
+        return target_df["is_click"].to_numpy(dtype=float)
+
+    train_df, target_df = _leak_frames()
+    with pytest.raises(ValueError, match="is_click"):
+        leakage_check(bad, train_df, target_df)
 
 
-@todo("B6")
 def test_excluded_source_is_rejected():
-    """Any feature whose source references item_statistics_monthly."""
+    def bad(train_df, target_df):
+        source = "item_statistics_monthly"
+        del source
+        return np.zeros(len(target_df))
+
+    train_df, target_df = _leak_frames()
+    with pytest.raises(ValueError, match="item_statistics_monthly"):
+        leakage_check(bad, train_df, target_df)
 
 
-@todo("B6")
 def test_legitimate_historical_aggregate_passes():
-    """user_ctr_decayed fits on train_df and maps onto target_df — must pass."""
+    """user_ctr fits on train_df and maps onto target_df — must pass."""
+    train_df, target_df = _leak_frames()
+    assert leakage_check(user_ctr, train_df, target_df) is True
+
+
+def test_dynamic_probe_catches_an_obfuscated_target_read():
+    """A runtime-assembled column name defeats the static grep; the outcome
+    probe (permute target-side outcomes, watch the output) still catches it."""
+
+    def sneaky(train_df, target_df):
+        column = "long" + "_view"
+        return target_df[column].to_numpy(dtype=float)
+
+    train_df, target_df = _leak_frames()
+    with pytest.raises(ValueError, match="permuted"):
+        leakage_check(sneaky, train_df, target_df)
+
+
+def test_unauditable_feature_fails_closed():
+    """No file-backed source and no __leak_source__ — refuse to trust it."""
+    compiled = eval("lambda train_df, target_df: __import__('numpy').zeros(len(target_df))")
+    train_df, target_df = _leak_frames()
+    with pytest.raises(ValueError, match="source"):
+        leakage_check(compiled, train_df, target_df)
 
 
 def _suspicious_tier(config, fidelity, seed):
