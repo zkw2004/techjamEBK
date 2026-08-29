@@ -76,8 +76,10 @@ ruff check .
 ```
 
 CI runs both on every PR to `main`, plus `pre-commit run --all-files` as a
-secrets gate. Neither job needs the dataset — every test runs against fixtures
-and tmp dirs, so CI stays in seconds.
+secrets gate. The loader also has full-archive integration checks, but they
+skip when the git-ignored dataset is absent; its split logic is exercised
+against temporary CSV fixtures in every CI run. This keeps CI in seconds while
+`make data && pytest` validates the organiser-fixed row counts locally.
 
 ## Layout
 
