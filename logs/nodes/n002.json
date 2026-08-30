@@ -1,0 +1,47 @@
+{
+  "id": "n002",
+  "parent": "n000",
+  "family": "objective",
+  "hypothesis": "Scoring only compares videos inside one user, so the part of the pointwise BCE objective that fits a user's overall long_view rate (a per-user constant) cannot change any within-user ordering and is wasted capacity. Replacing FM's pointwise BCE with BPR pairs sampled between a positive and a negative impression of the *same* user (in_session negatives) makes the training objective the same comparison the metric makes, so I predict validation primary rises above the FM baseline 0.6016 by at least +0.002 (i.e. >=0.6036), with the gain concentrated on users with many impressions and a mid-range positive rate, and near-zero change on users with very few impressions. If the pairwise variant lands within seed noise (+-0.0008) of 0.6016, then the pointwise/ranking mismatch is NOT the binding constraint here and the remaining headroom must be in features (user-history aggregates crossed with item terms) rather than in loss framing.",
+  "reasoning": "History is empty (only root n000), so this is the first probe and all five families are uncovered. The organisers rank loss framing as headroom item #1, and it is also the cheapest clean ablation: hold the model class (FM), the feature set (user_id x video_id, which the organisers say already absorbs most learnable signal) and the seed fixed, and change only the objective plus the negative-sampling scope needed to make pairs within-user. This isolates the loss effect against the known 0.6016 anchor, unlike jumping straight to LightGBM lambdarank which would confound loss with model class. The result also directly informs the next branch: a null result redirects the loop to the feature/history family instead of burning further iterations on objectives.",
+  "action_type": "config",
+  "fidelity": "screen",
+  "config": {
+    "model": "fm",
+    "loss": "pairwise",
+    "features": [
+      "user_id",
+      "video_id"
+    ],
+    "negative_sampling": "in_session",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "config: model=fm, loss=pairwise",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {
+    "gauc": 0.6053643502550826,
+    "ndcg": 0.48454435982937466,
+    "primary": 0.5449543550422287
+  },
+  "fold_primaries": [
+    0.5659455740372512,
+    0.5398352901426748,
+    0.5290822009467598
+  ],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {},
+  "seconds": 12.924595540971495,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-29T16:15:50Z"
+}

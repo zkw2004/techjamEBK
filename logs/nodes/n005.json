@@ -1,0 +1,55 @@
+{
+  "id": "n005",
+  "parent": "n000",
+  "family": "feature",
+  "hypothesis": "The failure of within-user BPR (n001-n003, best 0.5797 vs the 0.6016 pointwise anchor) says the loss/metric mismatch is not the binding constraint; the binding constraint is that user_id x video_id embeddings have no usable prior for items the user has few or no co-occurrences with, which is exactly where n003 collapses (pop_q1 = 0.357, pop_q2 = 0.446 vs pop_q4 = 0.581). I claim that a causal, past-dates-only, EB-smoothed item-side history feature (item long_view rate and item exposure count, decile-binned, computed for each date using only strictly earlier dates) carries item quality signal that varies within a user and therefore can reorder impressions, and that adding it plus a decile-binned user historical long_view rate (which is inert on its own but becomes an active user x item cross inside FM) to the FM pointwise baseline lifts validation primary by at least +0.002 above 0.6016, with the gain concentrated in the pop_q1/pop_q2 (rare-item) segments and near zero in pop_q4 where the ID embeddings are already well estimated. If primary moves less than +0.002 and the pop_q1/q2 segments do not improve, then item-side historical propensity is already absorbed by the video_id embedding and the remaining headroom is not in static-plus-aggregate features at all, redirecting the loop to sequence/multi-task representations.",
+  "reasoning": "The objective family has now been probed three times (n001, n002, n003) with the same claim and all three landed well below the 0.6016 FM anchor, so the pointwise/ranking framing is falsified as the headroom and further loss tinkering is low value. families_covered shows feature/model/training/ensemble all at 0, and the organisers' note that pure user-side first-order terms are exactly zero tells me the only legal way to use user history is through a cross, which FM supplies automatically once the user aggregate is a categorical field. The n003 segment table gives the concrete target: the popularity-quartile gradient (0.357 -> 0.581) is by far the largest structured error in the run so far, and item-side historical statistics are the cheapest legal fix (item_statistics_monthly is banned, so the aggregate must be built in-fold from past dates only). I hold model class (FM), loss (pointwise, as in the n000 baseline) and seed fixed so the delta is attributable to the features alone. Error fix: type='code' requires a concrete config, so the code is now paired with a config block rather than embedded alone.",
+  "action_type": "config",
+  "fidelity": "smoke",
+  "config": {
+    "model": "fm",
+    "loss": "pointwise",
+    "features": [
+      "user_id",
+      "video_id",
+      "dur_bucket",
+      "item_lv_rate_bin",
+      "item_expo_bin",
+      "user_lv_rate_bin"
+    ],
+    "negative_sampling": "all",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "config: model=fm, loss=pointwise",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {},
+  "fold_primaries": [],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "error",
+  "errors": [
+    {
+      "stage": "smoke",
+      "error_class": "schema",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/train.py\", line 473, in _child_entry\n    result = _execute_tier(config, fidelity, seed)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/train.py\", line 92, in _execute_tier\n    return _run_smoke(config, seed)\n           ^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/train.py\", line 292, in _run_smoke\n    validation_scores, test_scores = _fit_and_predict(\n                                     ^^^^^^^^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/train.py\", line 229, in _fit_and_predict\n    train_matrix = _matrix(train_frame, train_frame, features)\n                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/train.py\", line 187, in _matrix\n    builder = get_feature(name)\n              ^^^^^^^^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/features.py\", line 36, in get\n    raise KeyError(f\"unknown feature {name!r}; registered: {sorted(FEATURES)}\")\nKeyError: \"unknown feature 'item_lv_rate_bin'; registered: ['day_of_week', 'hour_of_day', 'user_activity', 'user_ctr', 'user_ctr_decayed', 'user_tag_affinity', 'video_ctr', 'video_impressions']\"\n"
+    }
+  ],
+  "repair_attempted": true,
+  "tokens": {
+    "in": 4611,
+    "out": 2708,
+    "model": "claude-haiku-4-5",
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "seconds": 1.277365708956495,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-29T16:18:22Z"
+}
