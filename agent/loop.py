@@ -270,12 +270,19 @@ def _proposal_failure(error: propose.ProposeError) -> None:
     )
 
 
+# Set at the end of every run() call; read by callers (cli.py) that want to
+# report *why* a run stopped without re-deriving it from the node history.
+LAST_STOP_REASON: str | None = None
+
+
 def run(
     max_iterations: int = 50,  # K23 (02_REQUIREMENTS.md): hard per-run cap
     *,
     timeout_s: int = 1800,
+    max_hours: float | None = None,  # K24 (02_REQUIREMENTS.md): wall-clock ceiling
     knowledge: str | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
+    time_fn: Callable[[], float] = time.monotonic,
 ) -> list[dict]:
     """Run autonomous candidates through smoke → screen → full.
 
@@ -283,7 +290,14 @@ def run(
     pilot nodes; a candidate can produce several persisted records.  The
     function returns the records written during this invocation for callers
     that want a live view, while durable state remains the append-only store.
+
+    Stops on whichever comes first: convergence (Section 4.5), the iteration
+    cap, or ``max_hours`` of wall-clock time — checked before each new
+    candidate starts, never mid-candidate, so a long-running full evaluation
+    is never killed partway through. ``LAST_STOP_REASON`` records which one
+    fired: ``"converged"``, ``"iteration_cap"``, or ``"time_cap"``.
     """
+    global LAST_STOP_REASON
     bad_iterations = (
         isinstance(max_iterations, bool)
         or not isinstance(max_iterations, int)
@@ -294,14 +308,22 @@ def run(
     bad_timeout = isinstance(timeout_s, bool) or not isinstance(timeout_s, int) or timeout_s < 1
     if bad_timeout:
         raise ValueError("timeout_s must be a positive integer")
+    if max_hours is not None and (isinstance(max_hours, bool) or max_hours <= 0):
+        raise ValueError("max_hours must be a positive number when given")
 
     manifest.preflight()
     knowledge = propose.load_knowledge() if knowledge is None else knowledge
     written: list[dict] = []
+    deadline = time_fn() + max_hours * 3600 if max_hours is not None else None
 
+    LAST_STOP_REASON = "iteration_cap"
     for _ in range(max_iterations):
         history = store.list_nodes()
         if converged(history):
+            LAST_STOP_REASON = "converged"
+            break
+        if deadline is not None and time_fn() >= deadline:
+            LAST_STOP_REASON = "time_cap"
             break
         parent = select_parent(history)
         try:
@@ -354,9 +376,9 @@ def run(
     return written
 
 
-def main(max_iterations: int = 50) -> None:
+def main(max_iterations: int = 50, max_hours: float | None = None) -> None:
     """CLI entry point; detailed records remain in ``logs/nodes``."""
-    run(max_iterations=max_iterations)
+    run(max_iterations=max_iterations, max_hours=max_hours)
 
 
 if __name__ == "__main__":

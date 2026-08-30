@@ -162,3 +162,55 @@ def test_convergence_uses_only_full_evaluations():
 def test_run_rejects_invalid_iteration_counts(value, isolated_loop):
     with pytest.raises(ValueError, match="max_iterations"):
         loop.run(max_iterations=value, knowledge="fixture")
+
+
+@pytest.mark.parametrize("value", [0, -1, True])
+def test_run_rejects_invalid_max_hours(value, isolated_loop):
+    with pytest.raises(ValueError, match="max_hours"):
+        loop.run(max_iterations=1, max_hours=value, knowledge="fixture")
+
+
+def test_max_hours_stops_before_the_iteration_cap(isolated_loop, monkeypatch):
+    """K24: a wall-clock ceiling, checked before each new candidate — never
+    mid-candidate, so a running full evaluation is never killed partway."""
+
+    def fake_propose(*_args):
+        return _action(0), {"in": 1, "out": 1, "model": "fake"}
+
+    def fake_execute(action: Action, fidelity: str, timeout_s: int) -> dict:
+        del timeout_s
+        return _success(action, fidelity)
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.execute, "execute", fake_execute)
+
+    # First check (before iteration 1) is under budget; every check after is
+    # over it — so exactly one candidate completes before the deadline fires.
+    clock = iter([0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+
+    written = loop.run(
+        max_iterations=50,
+        max_hours=1 / 3600,  # 1 second
+        knowledge="fixture",
+        sleep_fn=lambda _seconds: None,
+        time_fn=lambda: next(clock, 100.0),
+    )
+
+    assert loop.LAST_STOP_REASON == "time_cap"
+    assert len(written) > 0  # the in-flight candidate was allowed to finish
+
+
+def test_last_stop_reason_reports_the_iteration_cap(isolated_loop, monkeypatch):
+    def fake_propose(*_args):
+        return _action(0), {"in": 1, "out": 1, "model": "fake"}
+
+    def fake_execute(action: Action, fidelity: str, timeout_s: int) -> dict:
+        del timeout_s
+        return _success(action, fidelity)
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.execute, "execute", fake_execute)
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _seconds: None)
+
+    assert loop.LAST_STOP_REASON == "iteration_cap"
