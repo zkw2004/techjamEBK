@@ -96,12 +96,44 @@ def _fold_worker(
         connection.close()
 
 
+N_FOLDS = 3
+
+
+def _skipped_fold_seconds(study: optuna.Study, fold_seconds: list[float]) -> float:
+    """Cost of the folds a prune skipped, priced per fold index.
+
+    The internal folds are expanding windows (Section 6.2): fold 1 trains on
+    8 days, fold 3 on 12. Pruning after fold 1 therefore skips the two *most
+    expensive* folds, and costing them at the mean of the folds that already
+    ran credits them at the cheapest fold's price — a systematic
+    understatement of what pruning actually saved.
+
+    Price each skipped index at its observed mean cost across completed
+    trials, falling back to the running trial's own mean while no completed
+    trial has timed that index yet.
+    """
+    completed = [
+        trial.user_attrs.get("fold_seconds") or []
+        for trial in study.get_trials(deepcopy=False, states=(TrialState.COMPLETE,))
+    ]
+    fallback = float(np.mean(fold_seconds)) if fold_seconds else 0.0
+    total = 0.0
+    for index in range(len(fold_seconds), N_FOLDS):
+        observed = [row[index] for row in completed if len(row) > index]
+        total += float(np.mean(observed)) if observed else fallback
+    return total
+
+
 def _trial_fold_primaries(config: dict[str, Any], seed: int, trial: optuna.Trial) -> list[float]:
     """Supervise a bounded child so native crashes and hangs cannot kill a study."""
     from pipeline import train
 
     config = train._screen_config(config)
     timeout = float(config["hparams"].pop("trial_timeout_s", 1800))
+    # Study-level knobs are not model hyperparameters; left in place they are
+    # forwarded to the estimator, and LightGBM passes unknown keys straight
+    # through to its own params.
+    config["hparams"].pop("pruner_startup_trials", None)
     if not np.isfinite(timeout) or timeout <= 0:
         raise ValueError("trial_timeout_s must be finite and positive")
     context = train._process_context()
@@ -139,7 +171,7 @@ def _trial_fold_primaries(config: dict[str, Any], seed: int, trial: optuna.Trial
             trial.set_user_attr("fold_seconds", fold_seconds)
             trial.report(float(np.mean(primaries)), step=index)
             if trial.should_prune():
-                seconds_saved = float(np.mean(fold_seconds) * (3 - len(primaries)))
+                seconds_saved = _skipped_fold_seconds(trial.study, fold_seconds)
                 trial.set_user_attr("seconds_saved", seconds_saved)
                 raise optuna.TrialPruned()
             if index < 2:
@@ -194,7 +226,15 @@ def _run_locked_study(
         parent.mkdir(parents=True, exist_ok=True)
 
     sampler = optuna.samplers.TPESampler(seed=seed)
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5)
+    # Optuna's default of 5 startup trials leaves a quarter of a 20-trial
+    # budget unprunable, which is most of why the study missed its 30%
+    # savings gate. Three still gives the median a real distribution to judge
+    # against while making 17 of 20 trials eligible. Overridable so a longer
+    # study can be more conservative.
+    startup = int(base_config.get("hparams", {}).get("pruner_startup_trials", 3))
+    if startup < 1:
+        raise ValueError("pruner_startup_trials must be at least one")
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=startup)
     study = optuna.create_study(
         direction="maximize",
         sampler=sampler,

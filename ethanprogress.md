@@ -37,7 +37,7 @@ estimates explicitly rather than presenting them as measured speedups.
 | C4b Generated features | Complete locally | `pipeline/codegen.py`: syntax → schema → leakage → smoke → screen → full gauntlet; safe `user_author_affinity` accepted end to end, leaky twin quarantined by the dynamic probe. 8 tests. |
 | C4 LightGBM | Complete locally; runnable only after the OpenMP fix | Pointwise and LambdaRank both pass real internal-fold screens; group sorting, original prediction order, deterministic encoding, and fold-selected refit budgets are tested. Real full-tier `0.599210` pointwise / `0.597906` LambdaRank — both **below** the FM baseline, see the ladder note below. |
 | C5 DeepFM | Complete locally | Deterministic CPU model uses patience `1` and the O(n) interaction identity; a one-epoch real screen completed in `5.61s`. |
-| C6 Optuna | Implementation complete; performance gate unmet | Real 20-trial study finished, 8 pruned, 19.04% estimated time saved (below 30%). Actual owner-kill/resume and bounded native-failure containment tested. A-side dispatch pending. |
+| C6 Optuna | **Complete — gate met** | Real 20-trial study, 11 pruned, **36.87% saved** (gate ≥30%), best value `0.5764`. Owner-kill/resume and bounded native-failure containment tested. A-side dispatch still pending (Kaiwen). |
 | C7 Blending | **Complete — validated on real data** | Four methods, all C1 tiers, parent/fold/official/bootstrap gates, cache provenance and C3b evidence integration tested. Real parents FM `0.601684` / LGBM `0.599210`, Spearman `0.8564` (the 0.7-0.9 sweet spot). Best blend `logit_avg` `0.602198` correctly refused: +0.000514 is inside the 0.002 margin. |
 
 ## Critical fix: OpenMP backend isolation (2026-08-30)
@@ -165,6 +165,43 @@ falsified on this dataset: lambdarank does not beat pointwise here. That is a
 real result to report, not a failure of the harness — propose → execute →
 evidence → falsification ran unattended and refused to promote a change that
 did not clear the noise floor.
+
+## C6 pruning gate met, 2026-08-30
+
+The study was saving 19.04% against a 30% acceptance criterion. Instrumenting
+a real study showed the shortfall had two causes, one an accounting error and
+one a configuration choice.
+
+**Skipped folds were priced at the wrong rate.** The internal folds are
+expanding windows (Section 6.2): fold 1 trains on 8 days, fold 3 on 12. A
+prune after fold 1 therefore skips the two *most expensive* folds, but
+`seconds_saved` costed them at `mean(fold_seconds)` over the folds that had
+already run — i.e. at the cheapest fold's price. `_skipped_fold_seconds` now
+prices each skipped index at its observed mean cost across completed trials,
+falling back to the running mean before any trial has timed that index.
+
+**A quarter of the budget was unprunable.** `MedianPruner(n_startup_trials=5)`
+leaves 5 of 20 trials exempt. Three still gives the median a real
+distribution to judge against while making 17 of 20 eligible. Exposed as
+`hparams.pruner_startup_trials` and stripped before the config reaches the
+model, since LightGBM forwards unknown hparams into its own params.
+
+Real 20-trial FM study on the official data, seed 11:
+
+```text
+wall clock                222s
+trials / pruned           20 / 11        (was 8)
+measured trial seconds    221.3s         (matches wall clock)
+seconds saved by pruning  129.2s
+PRUNING SAVINGS           36.87%         gate >= 30%  PASS   (was 19.04%)
+best value                0.5764  {k: 16, lr: 0.0022, max_epochs: 6}
+```
+
+Sanity check on the accounting: 129.2s over 11 pruned trials is 11.7s each,
+against a full trial of ~17.5s — consistent with skipping the two expensive
+folds of three, and the accounted total matches wall clock to within a
+second. The gain is a correction to measurement plus a real increase in
+pruned trials, not a redefinition of the metric.
 
 ## C7 validated on real data, 2026-08-30
 
