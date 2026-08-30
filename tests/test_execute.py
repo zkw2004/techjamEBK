@@ -216,3 +216,63 @@ def test_leaky_feature_code_action_is_classified_leak_suspected(monkeypatch):
 
     assert node["status"] == "error"
     assert node["errors"][0]["error_class"] == "leak_suspected"
+
+
+def test_accept_fn_is_called_on_success_and_sets_accepted(monkeypatch):
+    """Section 8.7: accepted is decided on the raw C1 result (which still
+    carries val_scores/val_user_ids) before conversion to the node shape
+    drops them — this is the only point in the system with access to both."""
+    seen = []
+
+    def fake_accept(result: dict) -> bool:
+        seen.append(result)
+        return result["primary"] > 0.5
+
+    def fake_runner(config, fidelity, seed, timeout_s):
+        result = _success(fidelity)
+        result["val_scores"] = [0.1, 0.2]
+        result["val_user_ids"] = [0, 1]
+        return result
+
+    monkeypatch.setattr(E, "_run_experiment", fake_runner)
+    node = E.execute(_action(), fidelity="full", timeout_s=12, accept_fn=fake_accept)
+
+    assert node["accepted"] is True
+    assert len(seen) == 1
+    assert "val_scores" in seen[0]  # accept_fn saw the raw result, not the node
+
+
+def test_accept_fn_can_reject(monkeypatch):
+    def fake_runner(config, fidelity, seed, timeout_s):
+        return _success(fidelity)
+
+    monkeypatch.setattr(E, "_run_experiment", fake_runner)
+    node = E.execute(_action(), fidelity="full", timeout_s=12, accept_fn=lambda _r: False)
+
+    assert node["accepted"] is False
+
+
+def test_accept_fn_is_never_called_on_a_failed_run(monkeypatch):
+    calls = []
+
+    def failing_runner(config, fidelity, seed, timeout_s):
+        return {"status": "error", "stage": fidelity, "error_class": "transient",
+                "traceback": "boom", "seconds": 0.1}
+
+    monkeypatch.setattr(E, "_run_experiment", failing_runner)
+    node = E.execute(
+        _action(), fidelity="full", timeout_s=12,
+        accept_fn=lambda r: calls.append(r) or True,
+    )
+
+    assert node["accepted"] is False
+    assert calls == []
+
+
+def test_accepted_defaults_to_false_without_an_accept_fn(monkeypatch):
+    """smoke/screen never pass accept_fn (agent/loop.py) — must stay False,
+    not silently accepted, when nothing decided otherwise."""
+    monkeypatch.setattr(E, "_run_experiment", lambda *a: _success("smoke"))
+    node = E.execute(_action(), fidelity="smoke", timeout_s=12)
+
+    assert node["accepted"] is False
