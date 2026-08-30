@@ -20,12 +20,15 @@ from agent import loop
 from agent.loop import ROOT_PARENT, select_parent
 
 
-def node(node_id: str, family: str, primary: float, *, fidelity: str = "full") -> dict:
+def node(
+    node_id: str, family: str, primary: float, *, fidelity: str = "full", accepted: bool = True
+) -> dict:
     return {
         "id": node_id,
         "family": family,
         "status": "ok",
         "fidelity": fidelity,
+        "accepted": accepted,
         "metrics": {"primary": primary},
     }
 
