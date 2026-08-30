@@ -8,6 +8,16 @@ import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+# Load .env before anything else touches os.environ. Without this, a real
+# `run`/`selfcheck`/`baseline` in a fresh shell that never sourced .env fails
+# every propose() call with an auth error and returns almost instantly, with
+# zero real nodes written — the failure looks like nothing happened rather
+# than like a config problem. override=False: real exported env vars (CI,
+# a teammate's shell) still win over .env.
+from dotenv import load_dotenv  # noqa: E402
+
+load_dotenv(override=False)
+
 
 def _archive_current_run() -> Path | None:
     """Move prior evidence aside; fresh runs never delete the audit trail."""

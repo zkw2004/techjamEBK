@@ -16,6 +16,7 @@ dependencies = [
     "torch; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     "optuna",
     "anthropic",
+    "python-dotenv",
     "pydantic>=2",
     "rich",
     "jinja2",
