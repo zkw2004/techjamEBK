@@ -6,9 +6,11 @@ in the same session, so the guiding question throughout was not "does it
 pass?" but **"would this have caught the bug if the bug came back, and is the
 number I reported the number reality would give?"**
 
-Three findings, all in the *tests* rather than the production fixes. That
-distribution is itself worth noting: the fixes were verified against real
-failures, while the tests guarding them were not verified against anything.
+Four findings. Three are in the *tests* rather than the production fixes —
+the fixes were verified against real failures, while the tests guarding them
+were not verified against anything. The fourth is a reported metric that does
+not survive independent measurement, and it retracts a claim already merged
+to `main`.
 
 ---
 
@@ -109,25 +111,67 @@ green. Nothing was wrong except the evidence.
 
 ---
 
-## Ground truth: is the C6 36.87% claim real?
+## Finding 4 — the C6 gate claim was wrong
 
-The C6 gate was reported as met by an estimator this same work modified, which
-is exactly the shape of a gamed metric. Two independent checks:
+**Severity: high. Status: retracted, not yet re-fixed.**
 
-**Estimator soundness.** Fold cost by index across completed trials, showing
-the expanding-window structure the estimator relies on — folds genuinely cost
-more as the training window grows, so pricing skipped folds at the running
-mean of cheaper earlier folds does understate savings.
+C6 was reported as meeting its 30% pruning gate at 36.87%. That number came
+from the estimator the same work had just modified, and was never checked
+against an independent measurement. Running the identical 20-trial study
+twice — `NopPruner` against `MedianPruner` — and comparing wall clock:
 
-**Wall-clock comparison.** The same 20-trial study run with `NopPruner` and
-with `MedianPruner`, comparing measured wall clock rather than the estimator's
-own arithmetic. See `ethanprogress.md` for the recorded figures.
+```
+UNPRUNED  wall = 568.2s
+PRUNED    wall = 433.7s
+GROUND TRUTH wall-clock reduction = 23.67%
+CLAIMED (estimator)               = 37.59%
+discrepancy                       = +13.92 points
+```
 
-Independent of the outcome, two properties already argue the accounting is not
-inflated: the reported `measured_trial_seconds` of 221.3s matched observed
-wall clock of 222s, and 129.2s of saving across 11 pruned trials is 11.7s
-each against a ~17.5s full trial — the two-thirds a prune after fold 1 should
-yield with three folds.
+**The gate is not met.** Pruning saves real time — 23.7% of it — but not the
+30% the criterion requires, and the estimator overstates by ~14 points.
+
+Two supporting corrections:
+
+- **The justification for the estimator change was empirically false.** It was
+  argued that expanding windows make fold 3 substantially costlier than fold
+  1, so pricing skipped folds at the running mean understates savings.
+  Measured: `10.028 / 10.504 / 10.599s`, a 5.7% spread inside the ~22%
+  run-to-run variation. The estimator is marginally more correct and
+  practically inert; the improvement came from `n_startup_trials` 5 → 3.
+- **Probable source of the overstatement.** Skipped folds are priced at the
+  global mean fold cost. A trial is pruned for being bad, and bad configs here
+  tend to be cheap (`max_epochs` is a searched parameter), so a cheap trial is
+  credited with average-cost savings it never had.
+
+Left open: the unpruned study reports `measured_trial_seconds` of 3103.5s
+against 568.2s of wall clock (5.5x), while the pruned study is exact and a
+controlled synthetic study accounts correctly at 0.93x. Unexplained.
+
+Also noted: pruning changes what TPE samples next, so the two studies do not
+run identical trials. The comparison is directionally sound, not controlled.
+
+This is the finding that most justifies the audit. A metric was modified and
+then reported as passing a gate on the strength of its own arithmetic, in a
+pull request that has since been merged. Nothing caught it except measuring
+the thing itself.
+
+## Method note: an invalid measurement, and why
+
+The first attempt at the ground-truth measurement above was run while the
+full test suite, two mutation audits, and a duplicate copy of the audit script
+itself were executing concurrently. Under that contention it reported a 1.69%
+saving against a 27.47% ground truth, with per-trial durations 6x to 35x the
+study's own wall clock — arithmetically impossible for sequential trials.
+
+A controlled synthetic study on a quiet machine accounts correctly
+(`sum(trial.duration)` 5.32s against 5.70s wall clock, ratio 0.93), so the
+instrument was sound and the *measurement* was the defect. Repeated on an idle
+machine, it produced the figures in Finding 4.
+
+Recorded because it is the same error class the audit was looking for: a
+number produced under conditions that invalidate it, reported as if it were
+evidence.
 
 ---
 
