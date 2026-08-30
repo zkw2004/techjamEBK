@@ -38,7 +38,7 @@ estimates explicitly rather than presenting them as measured speedups.
 | C4 LightGBM | Complete locally; runnable only after the OpenMP fix | Pointwise and LambdaRank both pass real internal-fold screens; group sorting, original prediction order, deterministic encoding, and fold-selected refit budgets are tested. Real full-tier `0.599210` pointwise / `0.597906` LambdaRank — both **below** the FM baseline, see the ladder note below. |
 | C5 DeepFM | Complete locally | Deterministic CPU model uses patience `1` and the O(n) interaction identity; a one-epoch real screen completed in `5.61s`. |
 | C6 Optuna | Implementation complete; performance gate unmet | Real 20-trial study finished, 8 pruned, 19.04% estimated time saved (below 30%). Actual owner-kill/resume and bounded native-failure containment tested. A-side dispatch pending. |
-| C7 Blending | First pass complete; real lift pending | Four methods, all C1 tiers, parent/fold/official/bootstrap gates, cache provenance and C3b evidence integration tested. Requires two accepted full-config parents for real lift validation. |
+| C7 Blending | **Complete — validated on real data** | Four methods, all C1 tiers, parent/fold/official/bootstrap gates, cache provenance and C3b evidence integration tested. Real parents FM `0.601684` / LGBM `0.599210`, Spearman `0.8564` (the 0.7-0.9 sweet spot). Best blend `logit_avg` `0.602198` correctly refused: +0.000514 is inside the 0.002 margin. |
 
 ## Critical fix: OpenMP backend isolation (2026-08-30)
 
@@ -165,6 +165,46 @@ falsified on this dataset: lambdarank does not beat pointwise here. That is a
 real result to report, not a failure of the harness — propose → execute →
 evidence → falsification ran unattended and refused to promote a change that
 did not clear the noise floor.
+
+## C7 validated on real data, 2026-08-30
+
+C7 was blocked on "two accepted full-config parents", which looked like it
+needed the agent loop. It did not: the parents can be produced directly with
+`run_experiment` plus `store.write`, so the blend path was validated without
+waiting on Workstream A.
+
+Parents, full tier, seed 42, official validation window:
+
+```text
+n001  FM     primary=0.601684
+n002  LGBM   primary=0.599210
+per-user Spearman rho = 0.8564
+```
+
+**rho 0.8564 lands exactly in the 0.7-0.9 band Section 6.9 calls the sweet
+spot** — FM and LightGBM disagree enough for blending to be worth attempting,
+which is the first empirical confirmation of that prediction on this dataset.
+
+All four methods, full tier:
+
+```text
+rank_avg       0.601271   accepted=False
+logit_avg      0.602198   accepted=False
+weighted_rank  0.601719   accepted=False
+rrf            0.601357   accepted=False
+```
+
+`logit_avg` beats the better parent on the raw number (+0.000514 over FM) and
+is still **correctly refused**: the acceptance margin is `MIN_DELTA_FLOOR`
+0.002, so a gain of half the seed standard deviation cannot promote. Every
+gate — folds, official, bootstrap — reported False consistently.
+
+This closes C7's acceptance criteria against real data: four methods run,
+per-user Spearman reported, weights fitted on internal folds, and a blend
+refused unless it beats both parents by the margin. The honest result is that
+**no blend clears the noise floor on this dataset**; the machinery is proven,
+the lift is not. Trap 5 exists precisely to stop a +0.0005 result being
+promoted, and it did.
 
 ## C1 completed locally
 

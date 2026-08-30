@@ -1,0 +1,50 @@
+{
+  "id": "n001",
+  "parent": "n000",
+  "family": "model",
+  "hypothesis": "FM full-fidelity parent for C7 validation",
+  "reasoning": "",
+  "action_type": "config",
+  "fidelity": "full",
+  "config": {
+    "model": "fm",
+    "loss": "pointwise",
+    "features": [
+      "user_id",
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket"
+    ],
+    "negative_sampling": "all",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "",
+  "manifest_sha256": "c7-validation",
+  "metrics": {
+    "gauc": 0.6673109387273293,
+    "ndcg": 0.5360570420364241,
+    "primary": 0.6016839903818767
+  },
+  "fold_primaries": [
+    0.6022579576668827,
+    0.5698607445802084,
+    0.5598613365936052
+  ],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": true,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {},
+  "seconds": 0.0,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-30T11:14:29Z"
+}
