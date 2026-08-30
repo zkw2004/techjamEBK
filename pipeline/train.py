@@ -258,7 +258,13 @@ def _classify_exception(exc: BaseException) -> str:
         return "syntax"
     if isinstance(exc, MemoryError):
         return "oom"
-    if isinstance(exc, (KeyError, TypeError, ValueError, ValidationError)):
+    # NotImplementedError (e.g. model="deepfm_mtl") is the same class of
+    # problem as a malformed config: the exact same retry can never succeed.
+    # It used to fall through to "transient" below, which sent it through
+    # A5's backoff-and-retry loop instead of one repair attempt with a
+    # different config - the same failure mode _assert_single_backend was
+    # written to avoid, just for a different exception type.
+    if isinstance(exc, (KeyError, TypeError, ValueError, ValidationError, NotImplementedError)):
         return "schema"
     return "transient"
 
