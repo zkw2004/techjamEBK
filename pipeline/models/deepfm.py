@@ -49,6 +49,8 @@ def _network(field_dims, emb_dim: int, mlp_dims, dropout: float):
 
 @register("deepfm")
 class DeepFMModel:
+    native_backend = "torch"  # see pipeline/models/__init__.py BACKENDS
+
     def __init__(
         self,
         emb_dim: int = 16,

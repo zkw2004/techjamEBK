@@ -169,7 +169,7 @@ def test_trial_native_crash_and_hang_are_contained(monkeypatch, tmp_path, failur
             os._exit(13)
         time.sleep(5)
 
-    monkeypatch.setattr(train, "_seed_everything", lambda seed: None)
+    monkeypatch.setattr(train, "_seed_everything", lambda seed, config=None: None)
     monkeypatch.setattr(train, "_load_folds", lambda: [(None, None)] * 3)
     monkeypatch.setattr(train, "_fit_and_predict", broken_fit)
     started = time.monotonic()
@@ -199,7 +199,7 @@ def test_real_fold_loop_prunes_before_second_fit_without_official_data(monkeypat
     def forbidden():
         raise AssertionError("official data requested")
 
-    monkeypatch.setattr(train, "_seed_everything", lambda seed: None)
+    monkeypatch.setattr(train, "_seed_everything", lambda seed, config=None: None)
     monkeypatch.setattr(train, "_load_folds", lambda: [(frame, frame)] * 3)
     monkeypatch.setattr(train, "_load_data", forbidden)
     monkeypatch.setattr(train, "_fit_and_predict", fit)
@@ -229,7 +229,7 @@ def test_killed_owner_releases_lock_and_terminates_its_worker(monkeypatch, tmp_p
         import os, time
         from pathlib import Path
         from pipeline import train, tune
-        train._seed_everything = lambda seed: None
+        train._seed_everything = lambda seed, config=None: None
         train._load_folds = lambda: [(None, None)] * 3
         def fitting(*args):
             Path({str(marker)!r}).write_text(str(os.getpid()))

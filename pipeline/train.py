@@ -54,6 +54,15 @@ class LeakSuspectedError(RuntimeError):
         )
 
 
+class BackendConflictError(ValueError):
+    """A run would co-load two OpenMP runtimes in one process.
+
+    Classified `schema`, not `transient`: the conflict is a deterministic
+    property of the config, so retrying it can never succeed and A5 must not
+    spend the recovery budget on it.
+    """
+
+
 class FeatureLeakError(ValueError):
     """A feature failed the pre-training leakage guard (B6).
 
@@ -198,9 +207,47 @@ def _classify_exception(exc: BaseException) -> str:
     return "transient"
 
 
+def _config_backends(config: dict) -> set[str]:
+    """Native runtimes this config will load, following blends to their parents."""
+    from pipeline.models import backend
+
+    if config["model"] != "blend":
+        return {backend(config["model"])} - {None}
+    backends = set()
+    for node_id in config.get("parents", []):
+        try:
+            parent = _parent_config(node_id)
+        except (KeyError, OSError, ValueError):
+            continue  # resolution errors surface later with a better message
+        backends |= _config_backends(parent)
+    return backends
+
+
+def _assert_single_backend(config: dict) -> None:
+    """Refuse a run that would load two OpenMP runtimes into one process.
+
+    torch and LightGBM each link their own libomp; co-loading them aborts the
+    interpreter with OMP Error #15 (see pipeline/models/__init__.py). An abort
+    is uncatchable, so the parent would only see a dead child and classify it
+    `transient` — which A5 retries with backoff, burning the budget on a
+    failure that can never succeed. Failing here instead is deterministic,
+    explains itself, and classifies as a schema error that A5 does not retry.
+    """
+    backends = _config_backends(config)
+    if len(backends) > 1:
+        raise BackendConflictError(
+            f"this run needs both {' and '.join(sorted(backends))} in one process; "
+            "torch and LightGBM link separate OpenMP runtimes and co-loading them "
+            "aborts the interpreter (OMP Error #15). Blend their cached full-tier "
+            "scores instead of refitting mixed-backend parents together, or run the "
+            "parents in separate experiments first so the score cache is warm."
+        )
+
+
 def _execute_tier(config: dict, fidelity: str, seed: int) -> dict:
     """Execute one fidelity tier inside the isolated child process."""
-    _seed_everything(seed)
+    _assert_single_backend(config)
+    _seed_everything(seed, config)
     if config["model"] == "blend":
         from pipeline.blending import run_blend
 
@@ -216,10 +263,24 @@ def _execute_tier(config: dict, fidelity: str, seed: int) -> dict:
     raise ValueError(f"unsupported fidelity {fidelity!r}")
 
 
-def _seed_everything(seed: int) -> None:
+def _seed_everything(seed: int, config: dict | None = None) -> None:
+    """Seed every RNG this run can touch.
+
+    Torch is seeded only when the run actually needs it. Importing torch
+    unconditionally used to co-load its libomp alongside LightGBM's and abort
+    the process, so every LightGBM experiment died before training (see
+    `_assert_single_backend`). `config=None` keeps the historical behaviour
+    for callers that seed without a config in hand.
+    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    if config is not None and "torch" not in _config_backends(config):
+        return
+    if config is None and "torch" not in sys.modules:
+        # Nothing has committed this process to torch; importing it now could
+        # be the very co-load that aborts the interpreter.
+        return
     try:
         import torch
     except ImportError:
@@ -594,7 +655,7 @@ def _run_confirm(config: dict, seed: int) -> dict:
     runs = []
     for offset in range(5):
         run_seed = seed + offset
-        _seed_everything(run_seed)
+        _seed_everything(run_seed, config)
         run = _run_full(config, run_seed)
         if run["primary"] > LEAK_CANARY_PRIMARY:
             raise LeakSuspectedError(run["primary"])
@@ -660,6 +721,32 @@ def _stop_process(process) -> None:
     if process.is_alive():
         process.kill()
         process.join(PROCESS_STOP_GRACE_S)
+
+
+def _child_death_report(process, exc: BaseException) -> str:
+    """Explain a worker that died without sending a result.
+
+    A bare `EOFError` says only that the pipe closed. When the child was
+    killed by a signal the exit code carries the reason, and a native abort
+    (SIGABRT) is nearly always two OpenMP runtimes co-loaded — worth naming,
+    because the traceback is the only place that diagnosis can surface.
+    """
+    detail = "".join(traceback_module.format_exception_only(type(exc), exc)).strip()
+    exitcode = process.exitcode if process is not None else None
+    if exitcode is None or exitcode >= 0:
+        return f"{detail}\nworker exited with code {exitcode} before sending a result"
+    try:
+        name = signal.Signals(-exitcode).name
+    except ValueError:
+        name = f"signal {-exitcode}"
+    hint = ""
+    if -exitcode in (signal.SIGABRT, signal.SIGSEGV, signal.SIGBUS):
+        hint = (
+            "\nA native crash, not a transient fault. The usual cause is two "
+            "OpenMP runtimes in one process (torch + LightGBM, OMP Error #15) — "
+            "check the model's native_backend declaration."
+        )
+    return f"{detail}\nworker killed by {name} (exit {exitcode}){hint}"
 
 
 def _result_schema_issue(result: dict, fidelity: str) -> str | None:
@@ -799,7 +886,7 @@ def run_experiment(
                 fidelity,
                 error_class,
                 started,
-                "".join(traceback_module.format_exception_only(type(exc), exc)),
+                _child_death_report(process, exc),
             )
         finally:
             process.join(PROCESS_STOP_GRACE_S)

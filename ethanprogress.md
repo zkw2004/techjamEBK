@@ -15,8 +15,9 @@ estimates explicitly rather than presenting them as measured speedups.
 
 - Last updated: 2026-08-30
 - Branch: `codex/continue-c-workflow`
-- Active task: Latest-main integration verified; real D5 benchmark running
-- Implementation commit: `3fb2186` (local only; not pushed or merged)
+- Active task: OpenMP backend isolation fixed; cross-model integration suite added
+- Implementation commits: `3fb2186` (C4-C7), `b081f1c` (latest-main integration),
+  local only; not pushed or merged into local `main`.
 - Integration base: `60cb273`, the latest fetched `main` when this branch began.
   Handoff commits `6c78c2d` and `a8fbc9a` were explicitly carried forward.
 - Latest integration: fetched `origin/main` at `44c05e5` with a clean working
@@ -34,10 +35,97 @@ estimates explicitly rather than presenting them as measured speedups.
 | C3 FM baseline | Complete locally | Organiser-equivalent validation primary `0.6014695`, within the `0.6016 ± 0.0008` gate. Leakage-safe C1 full tier scores `0.6006120`. |
 | C3b Evidence records | Complete locally | `pipeline/evidence.py`: full/confirm results carry config, fidelity, seed, fold and segment metrics, hypothesis, disproof condition, and a pass/fail decision; records are pure functions of (config, fidelity, seed). 7 tests. |
 | C4b Generated features | Complete locally | `pipeline/codegen.py`: syntax → schema → leakage → smoke → screen → full gauntlet; safe `user_author_affinity` accepted end to end, leaky twin quarantined by the dynamic probe. 8 tests. |
-| C4 LightGBM | Complete locally | Pointwise and LambdaRank both pass real internal-fold screens; group sorting, original prediction order, deterministic encoding, and fold-selected refit budgets are tested. |
+| C4 LightGBM | Complete locally; runnable only after the OpenMP fix | Pointwise and LambdaRank both pass real internal-fold screens; group sorting, original prediction order, deterministic encoding, and fold-selected refit budgets are tested. Real full-tier `0.599210` pointwise / `0.597906` LambdaRank — both **below** the FM baseline, see the ladder note below. |
 | C5 DeepFM | Complete locally | Deterministic CPU model uses patience `1` and the O(n) interaction identity; a one-epoch real screen completed in `5.61s`. |
 | C6 Optuna | Implementation complete; performance gate unmet | Real 20-trial study finished, 8 pruned, 19.04% estimated time saved (below 30%). Actual owner-kill/resume and bounded native-failure containment tested. A-side dispatch pending. |
 | C7 Blending | First pass complete; real lift pending | Four methods, all C1 tiers, parent/fold/official/bootstrap gates, cache provenance and C3b evidence integration tested. Requires two accepted full-config parents for real lift validation. |
+
+## Critical fix: OpenMP backend isolation (2026-08-30)
+
+**Every LightGBM experiment was failing on macOS, and the test suite could not
+finish.** torch ships its own `libomp.dylib` while LightGBM links the system
+one; a process that loads both aborts with `OMP: Error #15` in either import
+order. `_seed_everything` imported torch unconditionally, so each C4 run
+imported torch and then LightGBM and was killed by SIGABRT.
+
+Why it went unnoticed:
+
+- C1 saw only a closed pipe and classified the death `transient` — the one
+  class A5 retries with backoff, so the agent would have spent its whole
+  budget re-running an experiment that could never succeed.
+- CI is `ubuntu-latest`, where one shared libgomp makes the conflict
+  impossible. CI stayed green while every Mac aborted, including the machine
+  the demo runs on.
+- No test had ever run two model families in one session; each family's
+  tests passed in isolation.
+
+Fix:
+
+- Models declare `native_backend` (`pipeline/models/__init__.py`);
+  `lgbm` → `lightgbm`, `deepfm`/`deepfm_mtl` → `torch`, the numpy models
+  declare nothing and can join any process.
+- `_seed_everything(seed, config)` seeds torch only for runs that need it.
+  Every production call site now passes its config — `_run_confirm`,
+  `tune._fold_worker`, and `blending.run_blend` included, since a config-less
+  call would silently leave DeepFM unseeded and break determinism rather than
+  crash.
+- `_assert_single_backend` refuses a config needing both runtimes (a blend of
+  LightGBM and DeepFM parents) with a `BackendConflictError`, classified
+  `schema` so A5 does not retry a permanently impossible run.
+- `_child_death_report` names the killing signal and the likely cause instead
+  of surfacing a bare `EOFError`.
+- `tests/conftest.py` runs `native_backend`-marked tests in a forked child,
+  and `tests/test_deepfm.py` imports torch lazily — a module-level import
+  loaded torch into the pytest parent, which every later fork inherited.
+
+Verification on 2026-08-30:
+
+```text
+.venv/bin/pytest        404 passed, exit 0   (was: hard SIGABRT crash mid-run)
+.venv/bin/ruff check .  exit 0
+```
+
+## Real-data validation, 2026-08-30 (full tier, seed 42)
+
+Reference gates re-confirmed after the fix, and C4 measured for the first time:
+
+```text
+C2 random              primary=0.484473  gauc=0.5015  ndcg=0.4675
+C2 popularity          primary=0.580722  gauc=0.6387  ndcg=0.5227
+C3 fm                  primary=0.601684  gauc=0.6673  ndcg=0.5361   42s
+C4 lgbm pointwise      primary=0.599210  gauc=0.6639  ndcg=0.5346   99s
+C4 lgbm lambdarank     primary=0.597906  gauc=0.6619  ndcg=0.5339   61s
+```
+
+FM at `0.601684` sits inside the `0.6016 ± 0.0008` gate. **LightGBM
+underperforms FM on the five raw categorical fields** (−0.0025 pointwise),
+which matches the plan's own warning in Section 6.7: trees cannot represent
+the user×video interaction directly, so GBDT quality is almost entirely a
+function of feature quality.
+
+### C4b generated-feature lift benchmark (the pending innovation number)
+
+`gen_user_author_affinity` passed the full gauntlet on real data — syntax,
+schema, leakage (static scan + outcome-corruption probe), smoke, screen,
+full. Measured lift, LightGBM pointwise, full tier:
+
+```text
+lgbm + raw ids                      primary=0.599210
+lgbm + B4 aggregates                primary=0.599550   delta +0.000340
+lgbm + aggregates + gen affinity    primary=0.599838   delta +0.000288
+```
+
+**Honest reading: neither delta clears the noise floor.** Seed std is
+`0.0008` and `MIN_DELTA_FLOOR` is `0.002`, so both changes are inside noise
+and the C3b decision records them as `fail` — the stated disproof condition
+fires. The containment story is proven (a generated feature ran end to end
+under audit, and its leaky twin is still quarantined); the *lift* story is
+not. Do not present these numbers as an improvement.
+
+Consequence for the ladder: on this dataset FM currently beats a lightly
+tuned LightGBM, so effort is better spent on features and the agent loop than
+on GBDT tuning. Section 6.4's probe ordering should be revisited with these
+numbers rather than assumed.
 
 ## C1 completed locally
 
@@ -373,6 +461,9 @@ DYLD_LIBRARY_PATH=/Users/quekee/Desktop/techjamEBK/.venv-c-workflow/lib/python3.
   FM `0.6014687563529677` (within `0.6016 ± 0.0008`). The tiny FM difference
   from the earlier runtime does not change the gate. This reference FM test
   reproduces organiser stopping; production C1 still selects epochs on folds.
+- Production C1 full FM (seed 0) also reproduced exactly:
+  primary `0.6006120484001147`, folds `[0.6021106663245109,
+  0.5709097464276729, 0.5599074916729097]`, `141.69s` during concurrent checks.
 - Independent scoped review: two findings reproduced, fixed, retested, and
   approved on re-review. No remaining Critical/Important findings in the merge.
 - D5 real screen benchmark with 30 FM tuning trials is running; scores pending.
@@ -391,6 +482,16 @@ Files in this integration, relative to the previous local commit:
   `tests/test_select_parent.py`.
 
 ## Update log
+
+- 2026-08-30: Found and fixed the OpenMP backend conflict that made every
+  LightGBM experiment fail on macOS and crashed the test suite mid-run.
+  Added `tests/test_c_workflow_integration.py` (38 tests): every model family
+  × every fidelity tier through the public runner, per-family determinism,
+  both native families in one session, parent-process cleanliness, backend
+  declarations, mixed-backend refusal, signal-level crash reporting, and an
+  AST check that no `_seed_everything` call site omits its config. Suite
+  404 passed, Ruff clean. Re-validated the reference gates on real data and
+  measured C4 and the C4b lift benchmark for the first time.
 
 - 2026-08-30: Reconciled incoming C4/C5 model interfaces and tests. LightGBM
   accepts direct categorical matrices, dict/tuple user groups and `n_estimators`

@@ -212,7 +212,7 @@ def run_blend(config: dict, fidelity: str, seed: int) -> dict:
 
     runs = []
     for offset in range(5):
-        train._seed_everything(seed + offset)
+        train._seed_everything(seed + offset, config)
         seeded_parents = [{**parent, "seed": parent["seed"] + offset} for parent in parents]
         runs.append(_run_with_parents(config, "full", seed + offset, seeded_parents))
     segment_keys = sorted({key for run in runs for key in run["segments"]})

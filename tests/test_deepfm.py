@@ -7,9 +7,19 @@ import sys
 
 import numpy as np
 import pytest
-import torch
 
 from pipeline.models.deepfm import DeepFMModel
+
+# NOT imported at module scope: a top-level `import torch` loads torch into
+# the pytest *parent* at collection time, and every later forked child then
+# inherits it — so a LightGBM test would still co-load both runtimes and
+# abort (OMP Error #15). Import it inside the test bodies, which the
+# conftest hook runs in isolated children.
+
+# Every test here drives torch in-process. The conftest hook runs them
+# in a forked child so the pytest process never co-loads torch and LightGBM
+# (OMP Error #15 aborts the whole session).
+pytestmark = pytest.mark.native_backend("torch")
 
 
 def test_registry_import_does_not_initialize_torch_in_non_neural_workers():
@@ -37,6 +47,8 @@ def _learnable_rows(repeats: int = 20) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_deepfm_second_order_matches_hand_computed_pairwise_dots():
+    import torch
+
     embeddings = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
 
     interaction = DeepFMModel._second_order(embeddings)

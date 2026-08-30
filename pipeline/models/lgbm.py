@@ -14,6 +14,8 @@ from pipeline.models import register
 
 @register("lgbm")
 class LGBM:
+    native_backend = "lightgbm"  # see pipeline/models/__init__.py BACKENDS
+
     def __init__(
         self,
         loss: str = "pointwise",

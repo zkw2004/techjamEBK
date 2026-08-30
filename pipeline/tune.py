@@ -70,7 +70,10 @@ def _fold_worker(
         os.close(inherited_lock_fd)
     threading.Thread(target=_watch_owner, args=(owner_pid,), daemon=True).start()
     try:
-        train._seed_everything(seed)
+        # Pass the config: seeding is backend-scoped, and a config-less call
+        # would skip torch entirely and leave DeepFM trials unseeded.
+        train._assert_single_backend(config)
+        train._seed_everything(seed, config)
         folds = train._load_folds()
         if len(folds) != 3:
             raise ValueError("tuning requires exactly three internal folds")

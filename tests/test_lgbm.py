@@ -7,6 +7,11 @@ import pytest
 
 from pipeline.models.lgbm import LGBM
 
+# Every test here drives lightgbm in-process. The conftest hook runs them
+# in a forked child so the pytest process never co-loads torch and LightGBM
+# (OMP Error #15 aborts the whole session).
+pytestmark = pytest.mark.native_backend("lightgbm")
+
 
 @pytest.mark.parametrize("budget, expected", [({"n_estimators": 7}, 7),
                                              ({"n_estimators": 7, "num_boost_round": 3}, 3)])
