@@ -24,6 +24,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import pickle
+import subprocess
 import sys
 import traceback
 
@@ -43,6 +44,12 @@ def pytest_configure(config):
         "native_backend(name): run this test in a forked child so torch and "
         "LightGBM never co-load into the pytest process (OMP Error #15).",
     )
+    if sys.platform == "darwin":
+        # Fixture-heavy unit tests deliberately inherit monkeypatches into a
+        # worker. Native backend tests below use a fresh interpreter instead,
+        # so this test-only compatibility mode cannot reintroduce the MPS fork
+        # crash in production code.
+        os.environ["TECHJAM_TEST_FORK_FIXTURES"] = "1"
 
 
 def _run_forked(func, kwargs) -> None:
@@ -101,14 +108,34 @@ def _run_forked(func, kwargs) -> None:
     pytest.fail(outcome["traceback"], pytrace=False)
 
 
+def _run_native_subprocess(nodeid: str) -> None:
+    """Run a macOS torch/LightGBM test in a fresh exec'ed interpreter."""
+    environment = dict(os.environ)
+    environment["TECHJAM_NATIVE_BACKEND_CHILD"] = "1"
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", nodeid],
+        text=True,
+        capture_output=True,
+        env=environment,
+        check=False,
+    )
+    if completed.returncode != 0:
+        pytest.fail((completed.stdout + completed.stderr).strip(), pytrace=False)
+
+
 @pytest.hookimpl(tryfirst=True)
 def pytest_pyfunc_call(pyfuncitem):
-    """Divert `native_backend`-marked tests into a forked child."""
+    """Isolate native-backend tests without co-loading their runtimes."""
     marker = pyfuncitem.get_closest_marker("native_backend")
     if marker is None or not FORK_AVAILABLE:
         return None
     if sys.platform not in ("darwin", "linux"):
         return None
+    if sys.platform == "darwin":
+        if os.environ.get("TECHJAM_NATIVE_BACKEND_CHILD") == "1":
+            return None
+        _run_native_subprocess(pyfuncitem.nodeid)
+        return True
     kwargs = {name: pyfuncitem.funcargs[name] for name in pyfuncitem._fixtureinfo.argnames}
     _run_forked(pyfuncitem.obj, kwargs)
     return True  # the hook handled the call

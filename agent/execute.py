@@ -9,6 +9,8 @@ no Docker (Section 12).
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
+import sys
 import time
 import traceback as traceback_module
 from numbers import Real
@@ -119,7 +121,12 @@ def _node(action: Action, fidelity: str, result: dict) -> dict:
 
 
 def _process_context():
+    """Use a clean child after PyTorch/MPS has touched macOS Objective-C state."""
     methods = mp.get_all_start_methods()
+    if os.environ.get("TECHJAM_TEST_FORK_FIXTURES") == "1" and "fork" in methods:
+        return mp.get_context("fork")
+    if sys.platform == "darwin" and "spawn" in methods:
+        return mp.get_context("spawn")
     return mp.get_context("fork" if "fork" in methods else "spawn")
 
 

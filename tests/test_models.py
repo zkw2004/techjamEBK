@@ -486,7 +486,7 @@ def test_invalid_success_metadata_returns_schema_error(monkeypatch, tier):
 def test_process_setup_failure_never_raises(monkeypatch):
     import pipeline.train as train
 
-    def fail_to_create_context():
+    def fail_to_create_context(*_args):
         raise MemoryError("cannot allocate process context")
 
     monkeypatch.setattr(train, "_process_context", fail_to_create_context)
