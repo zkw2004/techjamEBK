@@ -7,6 +7,8 @@ No network. The client is injected, which is why propose() takes one.
 from __future__ import annotations
 
 import json
+import sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -285,3 +287,50 @@ def test_repair_prompt_forbids_changing_the_hypothesis():
 
 def test_knowledge_file_loads():
     assert "long_view" in P.load_knowledge()
+
+
+# --- live-client construction ----------------------------------------------
+
+
+def test_client_forwards_the_workspace_id_for_identity_linked_keys(monkeypatch):
+    """Identity-linked API keys are rejected with a 400 unless the request
+    names the workspace it acts in. This is only reachable on a real call, so
+    the mocked tests never saw it — the first live run failed here."""
+    import agent.propose as module
+
+    captured = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    fake_sdk = types.SimpleNamespace(Anthropic=FakeAnthropic)
+    monkeypatch.setitem(sys.modules, "anthropic", fake_sdk)
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_test")
+    module.set_client(None)
+
+    module._get_client()
+
+    assert captured["default_headers"] == {"anthropic-workspace-id": "wrkspc_test"}
+    module.set_client(None)
+
+
+def test_client_sends_no_workspace_header_when_none_is_configured(monkeypatch):
+    """An ordinary key must keep working: sending an empty workspace header
+    would break the common case to fix the rare one."""
+    import agent.propose as module
+
+    captured = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(Anthropic=FakeAnthropic))
+    monkeypatch.delenv("ANTHROPIC_WORKSPACE_ID", raising=False)
+    module.set_client(None)
+
+    module._get_client()
+
+    assert captured["default_headers"] is None
+    module.set_client(None)

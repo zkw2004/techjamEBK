@@ -127,6 +127,45 @@ tuned LightGBM, so effort is better spent on features and the agent loop than
 on GBDT tuning. Section 6.4's probe ordering should be revisited with these
 numbers rather than assumed.
 
+## Live agent loop verified end to end, 2026-08-30
+
+The A3 proposal path had only ever run against an injected fake client, so
+its live behaviour was unverified. Running it for real surfaced two blockers
+and then produced a complete closed loop.
+
+Blockers found and fixed:
+
+- `anthropic` was listed in `pyproject.toml` but **absent from the venv**, so
+  `propose()` would have died with `ImportError` on its first real call.
+- `_get_client()` built a bare `anthropic.Anthropic()`. Identity-linked API
+  keys are rejected with a 400 — *"anthropic-workspace-id is required"* —
+  unless the request names its workspace. It now forwards
+  `ANTHROPIC_WORKSPACE_ID` as a header when set, and behaves exactly as
+  before when unset. Two tests in `tests/test_propose.py` cover both paths;
+  a mocked client could never have caught this.
+
+Live proposal (claude-opus-5, 662 in / 1723 out / 4522 cache-write), given
+the real n001-n004 history: it chose `objective` — the family with zero
+coverage — and proposed LightGBM lambdarank as a clean single-variable test
+against the pointwise parent, **stating its own disproof condition**: *"if it
+lands within 0.002 of n004, the pointwise/ranking mismatch is not a real
+source of headroom here and the loss-framing branch should be abandoned."*
+
+Executing exactly that config on real data, full tier, seed 42:
+
+```text
+proposed lgbm lambdarank   primary=0.598165  gauc=0.6623  ndcg=0.5340
+pointwise parent (n004)    primary=0.599210
+delta                      -0.001045   (floor 0.002)
+C3b decision               fail — not promoted, 15 segment metrics recorded
+```
+
+**The agent's own disproof condition fired.** The loss-framing branch is
+falsified on this dataset: lambdarank does not beat pointwise here. That is a
+real result to report, not a failure of the harness — propose → execute →
+evidence → falsification ran unattended and refused to promote a change that
+did not clear the noise floor.
+
 ## C1 completed locally
 
 - Added `smoke`, `screen`, `full`, and five-seed `confirm` tiers.
@@ -483,6 +522,11 @@ Files in this integration, relative to the previous local commit:
 
 ## Update log
 
+- 2026-08-30: Verified the live A3 path against the real Anthropic API for
+  the first time. Installed the missing `anthropic` dependency and taught
+  `_get_client()` to forward `ANTHROPIC_WORKSPACE_ID` for identity-linked
+  keys. Ran a full closed loop on real data: the proposal's own disproof
+  condition fired, falsifying the loss-framing branch. Suite 406 passed.
 - 2026-08-30: Found and fixed the OpenMP backend conflict that made every
   LightGBM experiment fail on macOS and crashed the test suite mid-run.
   Added `tests/test_c_workflow_integration.py` (38 tests): every model family
