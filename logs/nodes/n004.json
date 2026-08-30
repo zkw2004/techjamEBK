@@ -1,0 +1,39 @@
+{
+  "id": "n004",
+  "parent": "n000",
+  "family": "feature",
+  "hypothesis": "The failure of within-user BPR (n001-n003, best 0.5797 vs the 0.6016 pointwise anchor) says the loss/metric mismatch is not the binding constraint; the binding constraint is that user_id x video_id embeddings have no usable prior for items the user has few or no co-occurrences with, which is exactly where n003 collapses (pop_q1 = 0.357, pop_q2 = 0.446 vs pop_q4 = 0.581). I claim that a causal, past-dates-only, EB-smoothed item-side history feature (item long_view rate and item exposure count, decile-binned, computed for each date using only strictly earlier dates) carries item quality signal that varies within a user and therefore can reorder impressions, and that adding it plus a decile-binned user historical long_view rate (which is inert on its own but becomes an active user x item cross inside FM) to the FM pointwise baseline lifts validation primary by at least +0.002 above 0.6016, with the gain concentrated in the pop_q1/pop_q2 (rare-item) segments and near zero in pop_q4 where the ID embeddings are already well estimated. If primary moves less than +0.002 and the pop_q1/q2 segments do not improve, then item-side historical propensity is already absorbed by the video_id embedding and the remaining headroom is not in static-plus-aggregate features at all, redirecting the loop to sequence/multi-task representations.",
+  "reasoning": "The objective family has now been probed three times (n001, n002, n003) with the same claim and all three landed well below the 0.6016 FM anchor, so the pointwise/ranking framing is falsified as the headroom and further loss tinkering is low value. families_covered shows feature/model/training/ensemble all at 0, and the organisers' note that pure user-side first-order terms are exactly zero tells me the only legal way to use user history is through a cross, which FM supplies automatically once the user aggregate is a categorical field. The n003 segment table gives the concrete target: the popularity-quartile gradient (0.357 -> 0.581) is by far the largest structured error in the run so far, and item-side historical statistics are the cheapest legal fix (item_statistics_monthly is banned, so the aggregate must be built in-fold from past dates only). I hold model class (FM), loss (pointwise, as in the n000 baseline) and seed fixed so the delta is attributable to the features alone.",
+  "action_type": "code",
+  "fidelity": "smoke",
+  "config": {},
+  "diff": "generated Python source executed in isolated subprocess",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {},
+  "fold_primaries": [],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "error",
+  "errors": [
+    {
+      "stage": "validation",
+      "error_class": "schema",
+      "traceback": "type='code' requires a concrete config before execution"
+    }
+  ],
+  "repair_attempted": false,
+  "tokens": {
+    "in": 2681,
+    "out": 5507,
+    "model": "claude-opus-5",
+    "cache_read": 3992,
+    "cache_write": 0
+  },
+  "seconds": 1.837499439716339e-05,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-29T16:17:48Z"
+}
