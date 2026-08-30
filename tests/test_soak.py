@@ -80,12 +80,34 @@ def _peak_rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / divisor
 
 
+def _current_rss_mb() -> float:
+    """Resident set size *now*.
+
+    `ru_maxrss` is a high-water mark that never falls, so it cannot separate a
+    steady leak from a single transient spike. An audit that injected a 2MB
+    per-run leak went undetected against a peak-RSS bound; measuring current
+    RSS and fitting the trend catches it.
+    """
+    import subprocess
+
+    probe = subprocess.run(
+        ["ps", "-o", "rss=", "-p", str(os.getpid())], capture_output=True, text=True
+    )
+    return float(probe.stdout.strip() or 0) / 1024
+
+
+# Observed growth over 120 real iterations is ~0.023 MB/iteration. This bound
+# leaves ~20x headroom for allocator noise while still failing a per-run leak
+# of a megabyte or more, which is the size that ends an overnight run.
+MAX_RSS_GROWTH_MB_PER_ITERATION = 0.5
+
+
 def test_sustained_runs_leak_no_descriptors_memory_or_children(runner):
     """A leak of one descriptor or child per experiment is invisible over the
     handful of calls every other test makes, and fatal over a few hundred."""
     iterations = 48
     before_fds = _open_descriptors()
-    before_rss = _peak_rss_mb()
+    samples: list[tuple[int, float]] = []
 
     failures = []
     for index in range(iterations):
@@ -99,6 +121,10 @@ def test_sustained_runs_leak_no_descriptors_memory_or_children(runner):
         )
         if result["status"] != "ok":
             failures.append((index, model, fidelity, result.get("error_class")))
+        # Skip the first few: import and allocator warm-up is a step change,
+        # not a leak, and including it biases the slope.
+        if index >= 8:
+            samples.append((index, _current_rss_mb()))
 
     assert not failures, f"experiments failed under repetition: {failures[:5]}"
 
@@ -109,39 +135,45 @@ def test_sustained_runs_leak_no_descriptors_memory_or_children(runner):
             "a per-experiment pipe or process leak exhausts the limit on a long run"
         )
 
-    # Peak RSS never decreases, so this bounds *growth*, not usage. A real
-    # per-run leak at this fixture size shows up as tens of MB.
-    growth = _peak_rss_mb() - before_rss
-    assert growth < 150, f"peak RSS grew {growth:.1f}MB over {iterations} runs"
+    indices = np.array([index for index, _ in samples], dtype=float)
+    rss = np.array([value for _, value in samples], dtype=float)
+    slope = float(np.polyfit(indices, rss, 1)[0])
+    assert slope < MAX_RSS_GROWTH_MB_PER_ITERATION, (
+        f"RSS grew {slope:.2f}MB per iteration ({rss[0]:.1f} -> {rss[-1]:.1f}MB over "
+        f"{len(samples)} sampled runs); extrapolated over a 40-iteration run with "
+        f"confirm tiers that is {slope * 200:.0f}MB of leak"
+    )
 
     assert not _zombie_children(), "worker processes were not reaped"
 
 
 def _zombie_children() -> list[int]:
-    """Children left unreaped by the parent. Zombies accumulate silently until
-    the process table fills."""
+    """Children left unreaped by this process.
+
+    Zombies accumulate silently until the process table fills, so an
+    unattended run dies long after the code that caused it.
+
+    Listing children portably matters here: the first version used
+    `ps -P <pid>`, which is an illegal option on macOS and means "show
+    processor" on Linux. It returned nothing on both, so the assertion built
+    on it passed unconditionally — an audit that created a real zombie found
+    it undetected. `ps -eo pid,ppid,stat` is understood by both.
+    """
     import subprocess
 
     probe = subprocess.run(
-        ["ps", "-o", "pid=,stat=", "-p", ",".join(_child_pids()) or "-1"],
-        capture_output=True,
-        text=True,
+        ["ps", "-eo", "pid=,ppid=,stat="], capture_output=True, text=True
     )
+    mine = os.getpid()
     zombies = []
     for line in probe.stdout.splitlines():
-        parts = line.split()
-        if len(parts) == 2 and parts[1].startswith("Z"):
-            zombies.append(int(parts[0]))
+        parts = line.split(maxsplit=2)
+        if len(parts) != 3:
+            continue
+        pid, ppid, state = parts
+        if ppid.isdigit() and int(ppid) == mine and state.strip().startswith("Z"):
+            zombies.append(int(pid))
     return zombies
-
-
-def _child_pids() -> list[str]:
-    import subprocess
-
-    probe = subprocess.run(
-        ["ps", "-o", "pid=", "-P", str(os.getpid())], capture_output=True, text=True
-    )
-    return [line.strip() for line in probe.stdout.splitlines() if line.strip()]
 
 
 def test_repeated_identical_runs_stay_deterministic(runner):

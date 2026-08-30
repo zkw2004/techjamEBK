@@ -364,3 +364,57 @@ def test_study_knobs_do_not_reach_the_model_as_hyperparameters(monkeypatch):
     assert "pruner_startup_trials" not in config["hparams"]
     assert "trial_timeout_s" not in config["hparams"]
     assert config["hparams"]["num_leaves"] == 7
+
+
+def test_pruned_trials_record_per_index_pricing_not_the_running_mean(monkeypatch):
+    """Exercises the call site, not just the helper.
+
+    An audit by mutation showed the unit test above passes even with the call
+    site reverted to `mean(fold_seconds) * remaining` — it verified the
+    function but never that anything used it. This drives a real prune through
+    `_trial_fold_primaries` with folds whose cost rises by index (as expanding
+    windows do) and checks the recorded saving.
+    """
+    import time as time_module
+
+    from pipeline import train, tune
+
+    fold_cost = [0.01, 0.05, 0.09]
+    # Mutated in the parent between trials; each fork inherits the value set
+    # for the trial it is about to run.
+    state = {"fold": 0, "primary": 0.9}
+
+    def slow_fit(config, fit_frame, eval_frame, predict_frames, seed, summaries=None):
+        time_module.sleep(fold_cost[state["fold"] % 3])
+        state["fold"] += 1
+        return [np.zeros(1)]
+
+    monkeypatch.setattr(train, "_seed_everything", lambda seed, config=None: None)
+    monkeypatch.setattr(train, "_load_folds", lambda: [(None, None)] * 3)
+    monkeypatch.setattr(train, "_screen_config", lambda config: config)
+    monkeypatch.setattr(train, "_fit_and_predict", slow_fit)
+    monkeypatch.setattr(train, "_evaluate", lambda frame, scores: {"primary": state["primary"]})
+
+    study = optuna.create_study(
+        direction="maximize", pruner=optuna.pruners.ThresholdPruner(lower=0.5)
+    )
+    config = {"model": "random", "hparams": {"trial_timeout_s": 60}}
+
+    state["primary"] = 0.9  # comfortably above the threshold: runs all three folds
+    first = study.ask()
+    tune._trial_fold_primaries(dict(config, hparams=dict(config["hparams"])), 1, first)
+    study.tell(first, 0.9)
+    assert first.user_attrs["fold_seconds"] and len(first.user_attrs["fold_seconds"]) == 3
+
+    state["primary"] = 0.1  # below the threshold: pruned after the first fold
+    second = study.ask()
+    with pytest.raises(optuna.TrialPruned):
+        tune._trial_fold_primaries(dict(config, hparams=dict(config["hparams"])), 1, second)
+
+    saved = second.user_attrs["seconds_saved"]
+    running_mean_estimate = second.user_attrs["fold_seconds"][0] * 2
+
+    # Folds 2 and 3 were skipped and cost ~0.05 + 0.09 = 0.14; the running mean
+    # over the one completed fold would have credited only ~0.02.
+    assert saved == pytest.approx(fold_cost[1] + fold_cost[2], rel=0.6)
+    assert saved > running_mean_estimate * 2
