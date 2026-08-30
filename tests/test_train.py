@@ -271,6 +271,13 @@ def test_full_refit_uses_median_best_epoch_selected_on_internal_folds(monkeypatc
 
 
 def test_full_refit_uses_fold_selected_lightgbm_boosting_rounds(monkeypatch):
+    # _process_context() forces spawn for model="lgbm" to protect a *real*
+    # LightGBM run from the macOS OMP abort — it has no way to know
+    # _get_model_class was monkeypatched below to a numpy-only fixture that
+    # never touches the real backend. This test needs the config to literally
+    # say "lgbm" to exercise _run_full's num_boost_round branch, so it opts
+    # into fork explicitly rather than triggering the real-backend guard.
+    monkeypatch.setenv("TECHJAM_TEST_FORCE_FORK", "1")
     train = _install_fixture_backend(monkeypatch, FoldBoostingRoundModel)
 
     result = train.run_experiment(

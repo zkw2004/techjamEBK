@@ -807,8 +807,15 @@ def _process_context(config: dict | None = None):
     if os.environ.get("TECHJAM_TEST_FORK_FIXTURES") == "1" and "fork" in methods:
         # Fixture-backed tests use numpy-only models; a native backend must
         # still get spawn on macOS or MPS/Objective-C may abort after fork.
+        # This model-name check is a proxy — it cannot see that
+        # _get_model_class was monkeypatched to a fixture, so a test that
+        # deliberately names "lgbm"/"deepfm" to exercise that config branch
+        # (while never touching the real backend) needs an explicit escape
+        # hatch: TECHJAM_TEST_FORCE_FORK, set only via monkeypatch.setenv in
+        # that one test, torn down automatically at test teardown.
         model = (config or {}).get("model")
-        if model not in {"lgbm", "deepfm", "deepfm_mtl"}:
+        force_fork = os.environ.get("TECHJAM_TEST_FORCE_FORK") == "1"
+        if force_fork or model not in {"lgbm", "deepfm", "deepfm_mtl"}:
             return mp.get_context("fork")
     if sys.platform == "darwin" and "spawn" in methods:
         return mp.get_context("spawn")
