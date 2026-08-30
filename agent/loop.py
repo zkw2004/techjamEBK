@@ -271,7 +271,7 @@ def _proposal_failure(error: propose.ProposeError) -> None:
 
 
 def run(
-    max_iterations: int = 40,
+    max_iterations: int = 50,  # K23 (02_REQUIREMENTS.md): hard per-run cap
     *,
     timeout_s: int = 1800,
     knowledge: str | None = None,
@@ -354,7 +354,7 @@ def run(
     return written
 
 
-def main(max_iterations: int = 40) -> None:
+def main(max_iterations: int = 50) -> None:
     """CLI entry point; detailed records remain in ``logs/nodes``."""
     run(max_iterations=max_iterations)
 
