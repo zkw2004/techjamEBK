@@ -165,7 +165,17 @@ def _read_score_cache(config: dict, fidelity: str, seed: int,
 def _parent_config(node_id: str) -> dict:
     from agent import store
 
-    node = store.read(node_id)
+    try:
+        node = store.read(node_id)
+    except FileNotFoundError as exc:
+        # An absent node is permanent: the ledger is append-only, so a node
+        # that is missing now will never appear. Left as an OSError it would
+        # classify `transient`, and A5 would retry a blend that can never
+        # resolve until the dead-node cap forced a branch.
+        raise ValueError(
+            f"blend parent {node_id!r} does not exist in the node ledger"
+        ) from exc
+    node = dict(node)
     if node.get("status") != "ok" or not node.get("accepted"):
         raise ValueError(f"blend parent {node_id!r} must be an accepted successful node")
     if node.get("fidelity") != "full":
@@ -408,6 +418,16 @@ def _fit_and_predict(
     train_matrix = _matrix(train_frame, train_frame, features)
     train_labels = _column(train_frame, LABEL)
     train_users = _column(train_frame, "user_id")
+    # Validate centrally, not per model. RandomModel ignores its labels
+    # entirely, so a corrupt or empty training column used to "train"
+    # successfully for it while every other family raised — the one model
+    # that cannot detect bad data was the one reporting a score from it.
+    # Both conditions are permanent, so they must classify `schema` rather
+    # than the `transient` an unguarded failure would produce.
+    if len(train_labels) == 0:
+        raise ValueError("cannot fit a model on an empty training frame")
+    if not np.isfinite(np.asarray(train_labels, dtype=np.float64)).all():
+        raise ValueError(f"training column {LABEL!r} must contain only finite values")
     if config.get("negative_sampling", "all") != "all":
         from pipeline.data import sample_negatives
 
@@ -455,10 +475,30 @@ def _fit_and_predict(
 
 
 def _evaluate(frame, scores: np.ndarray) -> dict[str, float]:
+    """Score one frame with the immutable starter-kit evaluator.
+
+    The evaluator is deliberately total: it returns GAUC 0.5 for a set with no
+    rankable user and nDCG 0.0 for an empty one, so an empty or corrupt
+    evaluation frame yields a *plausible-looking* primary (0.25 empty, 0.75
+    all-positive) instead of an error. Those are fabrications — nothing was
+    measured — and the agent has no way to tell them from a real score. Refuse
+    them here, uniformly for every model, rather than letting each model's own
+    validation decide (RandomModel ignores labels entirely, so NaN labels used
+    to pass for it and fail for everything else).
+    """
     from pipeline.data import LABEL
     from pipeline.evaluate import evaluate
 
-    raw = evaluate(_column(frame, "user_id"), _column(frame, LABEL), scores)
+    user_ids = _column(frame, "user_id")
+    labels = _column(frame, LABEL)
+    if len(user_ids) == 0:
+        raise ValueError("cannot score an empty evaluation frame")
+    if len(labels) != len(user_ids) or len(scores) != len(user_ids):
+        raise ValueError("labels, user ids, and scores must be aligned one-to-one")
+    numeric_labels = np.asarray(labels, dtype=np.float64)
+    if not np.isfinite(numeric_labels).all():
+        raise ValueError(f"evaluation column {LABEL!r} must contain only finite values")
+    raw = evaluate(user_ids, labels, scores)
     return {
         "gauc": float(raw["GAUC"]),
         "ndcg": float(raw["nDCG@5"]),
