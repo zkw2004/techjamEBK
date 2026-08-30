@@ -14,11 +14,202 @@ from pipeline.models import register
 
 @register("lgbm")
 class LGBM:
-    def __init__(self, loss: str = "pointwise", seed: int = 42, **hparams):
-        self.loss, self.seed, self.hparams = loss, seed, hparams
+    def __init__(
+        self,
+        loss: str = "pointwise",
+        seed: int = 42,
+        feature_names: list[str] | None = None,
+        num_boost_round: int = 500,
+        early_stopping_rounds: int = 20,
+        **hparams,
+    ):
+        if loss not in {"pointwise", "lambdarank"}:
+            raise ValueError("LightGBM loss must be 'pointwise' or 'lambdarank'")
+        if num_boost_round <= 0 or early_stopping_rounds < 0:
+            raise ValueError("num_boost_round must be positive and early stopping non-negative")
+        self.loss = loss
+        self.seed = seed
+        self.feature_names = list(feature_names or [])
+        self.num_boost_round = int(num_boost_round)
+        self.early_stopping_rounds = int(early_stopping_rounds)
+        self.hparams = {
+            name: value
+            for name, value in hparams.items()
+            if name
+            not in {
+                "epochs",
+                "max_epochs",
+                "n_estimators",
+                "num_trials",
+            }
+        }
+        self.vocabs: list[dict[object, int] | None] = []
+        self.unknown_ids: list[int | None] = []
+        self.categorical_features: list[int] = []
+        self.booster = None
+        self.best_epoch: int | None = None
 
     def fit(self, X_train, y_train, X_val, y_val, groups=None) -> None:
-        raise NotImplementedError("C4")
+        import lightgbm as lgb
+
+        X_train = np.asarray(X_train, dtype=object)
+        y_train = np.asarray(y_train, dtype=float)
+        self._validate_xy(X_train, y_train, "train")
+        if (X_val is None) != (y_val is None):
+            raise ValueError("X_val and y_val must either both be provided or both be None")
+        if not self.feature_names:
+            self.feature_names = [f"field_{index}" for index in range(X_train.shape[1])]
+        if len(self.feature_names) != X_train.shape[1]:
+            raise ValueError("feature_names must match the matrix field count")
+
+        self._fit_encoder(X_train)
+        encoded_train = self._encode(X_train)
+        encoded_val = None
+        if X_val is not None:
+            X_val = np.asarray(X_val, dtype=object)
+            y_val = np.asarray(y_val, dtype=float)
+            self._validate_xy(X_val, y_val, "validation")
+            if X_val.shape[1] != X_train.shape[1]:
+                raise ValueError("train and validation matrices must have the same field count")
+            encoded_val = self._encode(X_val)
+
+        train_users, validation_users = self._split_groups(groups, len(X_train), X_val)
+        train_group = validation_group = None
+        if self.loss == "lambdarank":
+            if train_users is None:
+                raise ValueError("lambdarank requires training user ids in groups")
+            order, train_group = self._group_order(train_users)
+            encoded_train = encoded_train[order]
+            y_train = y_train[order]
+            if encoded_val is not None:
+                if validation_users is None:
+                    raise ValueError("lambdarank validation requires validation user ids")
+                validation_order, validation_group = self._group_order(validation_users)
+                encoded_val = encoded_val[validation_order]
+                y_val = y_val[validation_order]
+
+        train_set = lgb.Dataset(
+            encoded_train,
+            label=y_train,
+            group=train_group,
+            categorical_feature=self.categorical_features,
+            free_raw_data=False,
+        )
+        valid_sets = []
+        if encoded_val is not None:
+            valid_sets.append(
+                lgb.Dataset(
+                    encoded_val,
+                    label=y_val,
+                    group=validation_group,
+                    categorical_feature=self.categorical_features,
+                    reference=train_set,
+                    free_raw_data=False,
+                )
+            )
+
+        params = {
+            "objective": "binary" if self.loss == "pointwise" else "lambdarank",
+            "metric": "binary_logloss" if self.loss == "pointwise" else "ndcg",
+            "verbosity": -1,
+            "seed": self.seed,
+            "feature_fraction_seed": self.seed,
+            "bagging_seed": self.seed,
+            "data_random_seed": self.seed,
+            "deterministic": True,
+            "force_row_wise": True,
+            "num_threads": 1,
+            **self.hparams,
+        }
+        if self.loss == "lambdarank":
+            params.update(label_gain=[0, 1], eval_at=[5])
+        callbacks = [lgb.log_evaluation(0)]
+        if valid_sets and self.early_stopping_rounds:
+            callbacks.append(lgb.early_stopping(self.early_stopping_rounds, verbose=False))
+        self.booster = lgb.train(
+            params,
+            train_set,
+            num_boost_round=self.num_boost_round,
+            valid_sets=valid_sets,
+            callbacks=callbacks,
+        )
+        self.best_epoch = self.booster.best_iteration or self.num_boost_round
 
     def predict(self, X) -> np.ndarray:
-        raise NotImplementedError("C4")
+        if self.booster is None:
+            raise RuntimeError("fit() must be called before predict()")
+        X = np.asarray(X, dtype=object)
+        if X.ndim != 2 or X.shape[1] != len(self.feature_names):
+            raise ValueError("X must be two-dimensional with the fitted field count")
+        return np.asarray(
+            self.booster.predict(self._encode(X), num_iteration=self.best_epoch),
+            dtype=float,
+        )
+
+    @staticmethod
+    def _validate_xy(X: np.ndarray, y: np.ndarray, name: str) -> None:
+        if X.ndim != 2 or len(X) == 0:
+            raise ValueError(f"{name} matrix must be non-empty and two-dimensional")
+        if y.ndim != 1 or len(X) != len(y) or not np.isfinite(y).all():
+            raise ValueError(f"{name} labels must be finite with one value per row")
+
+    def _fit_encoder(self, X: np.ndarray) -> None:
+        from pipeline.data import FIELDS
+
+        self.vocabs = []
+        self.unknown_ids = []
+        self.categorical_features = []
+        for index, name in enumerate(self.feature_names):
+            if name not in FIELDS:
+                self.vocabs.append(None)
+                self.unknown_ids.append(None)
+                continue
+            vocab = {}
+            for value in X[:, index]:
+                if value not in vocab:
+                    vocab[value] = len(vocab)
+            self.vocabs.append(vocab)
+            self.unknown_ids.append(len(vocab))
+            self.categorical_features.append(index)
+
+    def _encode(self, X: np.ndarray) -> np.ndarray:
+        encoded = np.empty(X.shape, dtype=np.float64)
+        for index, vocab in enumerate(self.vocabs):
+            if vocab is None:
+                values = np.asarray(X[:, index], dtype=float)
+                if not np.isfinite(values).all():
+                    raise ValueError(
+                        f"numeric feature {self.feature_names[index]!r} must be finite"
+                    )
+                encoded[:, index] = values
+            else:
+                unknown = self.unknown_ids[index]
+                encoded[:, index] = [vocab.get(value, unknown) for value in X[:, index]]
+        return encoded
+
+    @staticmethod
+    def _split_groups(groups, train_rows: int, X_val):
+        if groups is None:
+            return None, None
+        if not isinstance(groups, tuple) or len(groups) != 2:
+            raise ValueError("groups must be a (train_user_ids, validation_user_ids) tuple")
+        train_users, validation_users = groups
+        train_users = np.asarray(train_users)
+        if len(train_users) != train_rows:
+            raise ValueError("training groups must have one user id per row")
+        if X_val is None:
+            if validation_users is not None:
+                raise ValueError("validation groups require validation data")
+            return train_users, None
+        validation_users = np.asarray(validation_users)
+        if len(validation_users) != len(X_val):
+            raise ValueError("validation groups must have one user id per row")
+        return train_users, validation_users
+
+    @staticmethod
+    def _group_order(user_ids: np.ndarray) -> tuple[np.ndarray, list[int]]:
+        order = np.argsort(user_ids.astype(str), kind="stable")
+        sorted_users = user_ids[order].astype(str)
+        boundaries = np.flatnonzero(sorted_users[1:] != sorted_users[:-1]) + 1
+        counts = np.diff(np.r_[0, boundaries, len(sorted_users)]).astype(int).tolist()
+        return order, counts

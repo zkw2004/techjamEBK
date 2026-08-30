@@ -51,6 +51,29 @@ class FoldEpochModel(FullSeedModel):
         return np.full(len(X), float(self.max_epochs))
 
 
+class FoldBoostingRoundModel(FullSeedModel):
+    def __init__(self, seed=42, num_boost_round=40, **hparams):
+        super().__init__(seed=seed)
+        self.num_boost_round = num_boost_round
+        self.best_epoch = None
+
+    def fit(self, X_train, y_train, X_val, y_val, groups=None):
+        if X_val is not None:
+            self.best_epoch = self.seed
+
+    def predict(self, X):
+        return np.full(len(X), float(self.num_boost_round))
+
+
+class GroupCaptureModel(FullSeedModel):
+    def __init__(self):
+        super().__init__()
+        self.groups = None
+
+    def fit(self, X_train, y_train, X_val, y_val, groups=None):
+        self.groups = groups
+
+
 def _frame(rows: int, offset: int = 0) -> dict[str, np.ndarray]:
     index = np.arange(rows) + offset
     return {
@@ -122,6 +145,17 @@ def test_smoke_caps_training_at_1000_rows_and_skips_metrics(monkeypatch):
     assert result["fold_primaries"] == []
 
 
+def test_smoke_does_not_supply_official_validation_for_early_stopping(monkeypatch):
+    class NoOfficialValidation(TinySeedModel):
+        def fit(self, X_train, y_train, X_val, y_val, groups=None):
+            assert X_val is None and y_val is None
+
+    train = _install_fixture_backend(monkeypatch, NoOfficialValidation)
+    result = train.run_experiment({"model": "random"}, fidelity="smoke")
+
+    assert result["status"] == "ok", result
+
+
 def test_screen_scores_exactly_three_internal_folds(monkeypatch):
     train = _install_fixture_backend(monkeypatch, FullSeedModel)
 
@@ -178,6 +212,34 @@ def test_full_refit_uses_median_best_epoch_selected_on_internal_folds(monkeypatc
 
     assert result["status"] == "ok"
     np.testing.assert_array_equal(result["val_scores"], np.full(6, 10.0))
+
+
+def test_full_refit_uses_fold_selected_lightgbm_boosting_rounds(monkeypatch):
+    train = _install_fixture_backend(monkeypatch, FoldBoostingRoundModel)
+
+    result = train.run_experiment(
+        {"model": "lgbm", "hparams": {"num_boost_round": 40}},
+        fidelity="full",
+        seed=9,
+    )
+
+    assert result["status"] == "ok"
+    np.testing.assert_array_equal(result["val_scores"], np.full(6, 10.0))
+
+
+def test_fit_and_predict_passes_train_and_validation_user_ids_as_groups(monkeypatch):
+    import pipeline.train as train
+
+    model = GroupCaptureModel()
+    training, validation, _ = _pandas_data()
+    monkeypatch.setattr(train, "_new_model", lambda config, seed: model)
+    config = {"features": ["user_id", "video_id"]}
+
+    train._fit_and_predict(config, training, validation, [validation], seed=1)
+
+    train_users, validation_users = model.groups
+    np.testing.assert_array_equal(train_users, training["user_id"].to_numpy())
+    np.testing.assert_array_equal(validation_users, validation["user_id"].to_numpy())
 
 
 def test_raw_label_cannot_be_selected_as_a_feature(monkeypatch):

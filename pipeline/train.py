@@ -7,16 +7,21 @@ MUST NOT raise. MUST enforce timeout_s. MUST be deterministic given seed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import multiprocessing as mp
 import os
 import random
 import resource
 import signal
 import sys
+import tempfile
 import time
 import traceback as traceback_module
 from collections.abc import Mapping
 from numbers import Real
+from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 from pydantic import ValidationError
@@ -38,6 +43,8 @@ SCREEN_BUDGET_CAPS = {
     "num_trials": 5,
 }
 
+SCORE_CACHE_DIR = Path("logs/scores")
+
 
 class LeakSuspectedError(RuntimeError):
     def __init__(self, primary: float):
@@ -54,6 +61,112 @@ class FeatureLeakError(ValueError):
     schema errors a repair attempt, and a leak must be quarantined rather
     than regenerated until it slips past the guard.
     """
+
+
+def _cache_code_fingerprint() -> str:
+    """Invalidate derived scores when implementation or source-file identity changes."""
+    from pipeline.data import DATA_DIR, LOG_FILES
+
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    paths = list(root.glob("*.py")) + list((root / "models").glob("*.py"))
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    for filename in (*LOG_FILES, "video_features_basic_pure.csv"):
+        path = DATA_DIR / filename
+        if path.is_file():
+            stat = path.stat()
+            digest.update(f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()
+
+
+def _frame_fingerprint(frame) -> str:
+    """Hash prediction row identity/context only; never inspect target outcomes."""
+    digest = hashlib.sha256()
+    for name in ("user_id", "video_id", "author_id", "date", "time_ms", "tab", "duration_ms"):
+        if _has_column(frame, name):
+            values = _column(frame, name).astype(str)
+            digest.update(f"{name}:{values.shape}:{values.dtype}".encode())
+            digest.update(np.ascontiguousarray(values).tobytes())
+    return digest.hexdigest()
+
+
+def _score_cache_key(config: dict, fidelity: str, seed: int) -> str:
+    payload = json.dumps(
+        {"config": config, "fidelity": fidelity, "seed": seed,
+         "implementation": _cache_code_fingerprint()},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _score_cache_path(config: dict, fidelity: str, seed: int) -> Path:
+    return SCORE_CACHE_DIR / f"{_score_cache_key(config, fidelity, seed)}.npz"
+
+
+def _write_score_cache(config: dict, fidelity: str, seed: int, result: dict,
+                       validation_frame=None, test_frame=None) -> Path:
+    """Atomically persist only the score arrays needed by a future blend."""
+    path = _score_cache_path(config, fidelity, seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".npz", delete=False) as handle:
+        temporary = Path(handle.name)
+        np.savez_compressed(
+            handle,
+            val_scores=np.asarray(result["val_scores"]),
+            val_user_ids=np.asarray(result["val_user_ids"]),
+            test_scores=np.asarray(result["test_scores"]),
+            validation_fingerprint=(
+                "" if validation_frame is None else _frame_fingerprint(validation_frame)
+            ),
+            test_fingerprint="" if test_frame is None else _frame_fingerprint(test_frame),
+        )
+    os.replace(temporary, path)
+    return path
+
+
+def _read_score_cache(config: dict, fidelity: str, seed: int,
+                      validation_frame=None, test_frame=None) -> dict | None:
+    path = _score_cache_path(config, fidelity, seed)
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            for frame, name in ((validation_frame, "validation_fingerprint"),
+                                (test_frame, "test_fingerprint")):
+                if frame is not None and (
+                    name not in archive or str(archive[name]) != _frame_fingerprint(frame)
+                ):
+                    return None
+            result = {name: archive[name].copy()
+                      for name in ("val_scores", "val_user_ids", "test_scores")}
+        if any(array.ndim != 1 for array in result.values()):
+            return None
+        if len(result["val_scores"]) != len(result["val_user_ids"]):
+            return None
+        if not all(np.isfinite(result[key]).all() for key in ("val_scores", "test_scores")):
+            return None
+        return result
+    except (ValueError, OSError, KeyError, EOFError, BadZipFile):
+        return None
+
+
+def _parent_config(node_id: str) -> dict:
+    from agent import store
+
+    node = store.read(node_id)
+    if node.get("status") != "ok" or not node.get("accepted"):
+        raise ValueError(f"blend parent {node_id!r} must be an accepted successful node")
+    if node.get("fidelity") != "full":
+        raise ValueError("C7 first-pass parents must be full-fidelity nodes, not seed averages")
+    if node.get("action_type") == "code":
+        raise ValueError("generated-code parents require source replay before they can be blended")
+    config = Config(**node.get("config", {})).model_dump()
+    if config["model"] == "blend":
+        raise ValueError("nested blend parents are not supported in the first C7 pass")
+    return config
 
 
 def _error_record(
@@ -88,6 +201,10 @@ def _classify_exception(exc: BaseException) -> str:
 def _execute_tier(config: dict, fidelity: str, seed: int) -> dict:
     """Execute one fidelity tier inside the isolated child process."""
     _seed_everything(seed)
+    if config["model"] == "blend":
+        from pipeline.blending import run_blend
+
+        return run_blend(config, fidelity, seed)
     if fidelity == "smoke":
         return _run_smoke(config, seed)
     if fidelity == "screen":
@@ -210,6 +327,7 @@ def _new_model(config: dict, seed: int):
         parents=config["parents"],
         blend_method=config["blend_method"],
         negative_sampling=config["negative_sampling"],
+        feature_names=config["features"],
     )
     return model_class(**kwargs)
 
@@ -235,7 +353,17 @@ def _fit_and_predict(
         validation_matrix = _matrix(train_frame, validation_frame, features)
         validation_labels = _column(validation_frame, LABEL)
 
-    model.fit(train_matrix, train_labels, validation_matrix, validation_labels)
+    train_users = _column(train_frame, "user_id")
+    validation_users = (
+        None if validation_frame is None else _column(validation_frame, "user_id")
+    )
+    model.fit(
+        train_matrix,
+        train_labels,
+        validation_matrix,
+        validation_labels,
+        groups=(train_users, validation_users),
+    )
     if fit_summaries is not None:
         fit_summaries.append({"best_epoch": getattr(model, "best_epoch", None)})
     outputs = []
@@ -292,7 +420,7 @@ def _run_smoke(config: dict, seed: int) -> dict:
     validation_scores, test_scores = _fit_and_predict(
         config,
         train_sample,
-        validation_sample,
+        None,
         [validation_sample, test_sample],
         seed,
     )
@@ -411,11 +539,12 @@ def _run_full(config: dict, seed: int) -> dict:
     fold_metrics, _, _, best_epochs = _score_folds(config, seed)
     refit_config = config
     if best_epochs:
+        budget_name = "num_boost_round" if config["model"] == "lgbm" else "max_epochs"
         refit_config = {
             **config,
             "hparams": {
                 **config["hparams"],
-                "max_epochs": int(np.median(best_epochs)),
+                budget_name: int(np.median(best_epochs)),
             },
         }
     train_frame, validation_frame, test_frame = _load_data()
@@ -427,7 +556,7 @@ def _run_full(config: dict, seed: int) -> dict:
         seed,
     )
     metrics = _evaluate(validation_frame, validation_scores)
-    return _success(
+    result = _success(
         "full",
         **metrics,
         fold_primaries=[item["primary"] for item in fold_metrics],
@@ -436,6 +565,11 @@ def _run_full(config: dict, seed: int) -> dict:
         val_user_ids=_column(validation_frame, "user_id"),
         test_scores=test_scores,
     )
+    if metrics["primary"] > LEAK_CANARY_PRIMARY:
+        raise LeakSuspectedError(metrics["primary"])
+    _write_score_cache(config, "full", seed, result,
+                       validation_frame=validation_frame, test_frame=test_frame)
+    return result
 
 
 def _run_confirm(config: dict, seed: int) -> dict:

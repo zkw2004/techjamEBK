@@ -22,6 +22,8 @@ venv/
 *.db
 *.sqlite3
 .optuna/
+logs/scores/*.npz
+logs/optuna/*.lock
 
 # os / editor
 .DS_Store

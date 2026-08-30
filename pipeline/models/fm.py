@@ -71,7 +71,13 @@ class FM:
             if X_val.shape[1] != X_train.shape[1]:
                 raise ValueError("train and validation matrices must have the same field count")
             encoded_val = self._encode(X_val)
-            validation_users = np.asarray(groups) if groups is not None else X_val[:, 0]
+            if isinstance(groups, tuple):
+                validation_users = groups[1]
+            else:
+                validation_users = groups
+            if validation_users is None:
+                validation_users = X_val[:, 0]
+            validation_users = np.asarray(validation_users)
             if len(validation_users) != len(y_val):
                 raise ValueError("groups must have one value per validation row")
 

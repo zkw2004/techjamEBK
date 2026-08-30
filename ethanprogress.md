@@ -8,14 +8,18 @@ and blending. Read `ethannotes.md` for the full technical brief and
 
 Update the date, task table, current blockers, and next action whenever a C task
 changes state. Add one short entry to the update log after a meaningful code or
-validation milestone. Record measured results and commands, not estimates.
+validation milestone. Record measured results and commands; label runtime-saving
+estimates explicitly rather than presenting them as measured speedups.
 
 ## Current status
 
-- Last updated: 2026-08-29
-- Branch: `feat/C1-run-experiment`
-- Active task: Innovation layer (C1b self-audit, C3b evidence, C4b generated features) implemented; C3 FM baseline awaiting commit
-- Working tree: C3 and the innovation layer are implemented but not committed
+- Last updated: 2026-08-30
+- Branch: `codex/continue-c-workflow`
+- Active task: Final verification and local commit; reconcile newer `main` next
+- Integration base: `60cb273`, the latest fetched `main` when this branch began.
+  Handoff commits `6c78c2d` and `a8fbc9a` were explicitly carried forward.
+- Remote change noticed at completion: `origin/main` is now `44c05e5` and
+  contains overlapping C4/C5 edits. No merge/reset/stash was attempted.
 
 ## Task tracker
 
@@ -27,10 +31,10 @@ validation milestone. Record measured results and commands, not estimates.
 | C3 FM baseline | Complete locally | Organiser-equivalent validation primary `0.6014695`, within the `0.6016 ± 0.0008` gate. Leakage-safe C1 full tier scores `0.6006120`. |
 | C3b Evidence records | Complete locally | `pipeline/evidence.py`: full/confirm results carry config, fidelity, seed, fold and segment metrics, hypothesis, disproof condition, and a pass/fail decision; records are pure functions of (config, fidelity, seed). 7 tests. |
 | C4b Generated features | Complete locally | `pipeline/codegen.py`: syntax → schema → leakage → smoke → screen → full gauntlet; safe `user_author_affinity` accepted end to end, leaky twin quarantined by the dynamic probe. 8 tests. |
-| C4 LightGBM | Ready | Run pointwise and LambdaRank; verify per-user groups and internal-fold early stopping. |
-| C5 DeepFM | Blocked by C4 | Complete CPU training within ten minutes with patience `1`. |
-| C6 Optuna | Blocked by C4-C5 | Run and resume a 20-trial TPE study with `MedianPruner` and SQLite. |
-| C7 Blending | Blocked by C4-C5 | Support four blend methods and require improvement over both parents. |
+| C4 LightGBM | Complete locally | Pointwise and LambdaRank both pass real internal-fold screens; group sorting, original prediction order, deterministic encoding, and fold-selected refit budgets are tested. |
+| C5 DeepFM | Complete locally | Deterministic CPU model uses patience `1` and the O(n) interaction identity; a one-epoch real screen completed in `5.61s`. |
+| C6 Optuna | Implementation complete; performance gate unmet | Real 20-trial study finished, 8 pruned, 19.04% estimated time saved (below 30%). Actual owner-kill/resume and bounded native-failure containment tested. A-side dispatch pending. |
+| C7 Blending | First pass complete; real lift pending | Four methods, all C1 tiers, parent/fold/official/bootstrap gates, cache provenance and C3b evidence integration tested. Requires two accepted full-config parents for real lift validation. |
 
 ## C1 completed locally
 
@@ -161,22 +165,199 @@ whether `gen_user_author_affinity` lifts LightGBM) are pending C4; all
 behaviour is verified on synthetic fixtures, and `tools/leak_demo.py --real`
 exercises the gauntlet against the local extract.
 
+## C4 completed locally
+
+- Implemented deterministic LightGBM pointwise and LambdaRank objectives.
+- Added train-fitted categorical vocabularies with unknown slots and native
+  categorical feature indices; no one-hot encoding.
+- Added stable per-user sorting and exact group counts for LambdaRank while
+  preserving original target-row prediction order.
+- Passed train and validation user IDs through the frozen model `groups` slot.
+- Reused fold-selected `best_epoch` as the final `num_boost_round` budget.
+- Installed the declared LightGBM dependency and its macOS `libomp` runtime
+  locally; no environment artifact is tracked by Git.
+
+Measured results on 2026-08-29:
+
+```text
+Baseline gates: Random, Popularity, FM       3 passed
+C4 focused RED -> GREEN tests                6 passed
+Pointwise screen primary                     0.5665747082411168
+Pointwise screen fold primaries              [0.5893355741603625, 0.5622036788518762, 0.5481848717111115]
+LambdaRank screen primary                    0.5709339734832006
+LambdaRank screen fold primaries             [0.5925785156933101, 0.565158303147914, 0.5550651016083779]
+Pointwise full primary                       0.5916666236670112
+Pointwise full GAUC / nDCG@5                 0.6528876578120902 / 0.5304455895219322
+Generated user-author affinity full primary  0.5916666236670112
+Generated-feature delta                      0.0 (hypothesis disproved; do not promote)
+Generated-feature containment                ACCEPTED through syntax/schema/leakage/smoke/screen/full
+```
+
+## C5 completed locally
+
+- Implemented a deterministic PyTorch DeepFM with per-field embeddings,
+  linear terms, MLP, and raw-logit output.
+- Implemented the FM second-order term with the O(n) identity rather than a
+  pairwise loop.
+- Added train-fitted categorical unknown slots and quantile buckets for
+  continuous generated features.
+- Added seeded minibatch order, CPU thread control, validation-loss early
+  stopping with patience exactly `1`, and fold-selected final epoch support.
+
+Measured results on 2026-08-29:
+
+```text
+C5 focused RED -> GREEN tests                3 passed
+One-epoch real screen primary                0.4893900293675011
+One-epoch real screen GAUC / nDCG@5          0.5162375373837707 / 0.4625425213512315
+One-epoch real screen fold primaries         [0.498886420332021, 0.4900394598809318, 0.4792442078895505]
+One-epoch real screen wall time              5.607072499988135 seconds
+```
+
+This is a budget probe demonstrating the runnable CPU path, not a claim that
+the untuned one-epoch DeepFM beats FM.
+
+## C6 implemented and measured (2026-08-30)
+
+- Added `pipeline/tune.py` and `tests/test_tune.py`: seeded single-worker TPE,
+  MedianPruner reporting after each B temporal fold, persistent SQLite studies,
+  total-budget resume, recorded errors and estimated pruning savings.
+- Reuses C1 matrix construction, model fitting and official evaluator; no new
+  loaders, splits or metrics. Official validation is not used by the objective.
+- Trials execute in bounded children (`hparams.trial_timeout_s`, default 1800s).
+  The owner receives each fold metric and decides whether to continue before
+  the next fit starts. Native crashes, hangs and invalid scores become evidence.
+- SQLite has a single-owner lock and config/search/seed identity guard. A killed
+  owner's worker releases inherited descriptors and exits; interrupted attempts
+  stay in the ledger but do not consume the resumed trial budget. Tests include
+  killing an actual owner subprocess during a fit and resuming the same database.
+- The real study's first attempt aborted because two OpenMP runtimes were loaded.
+  It is retained as interrupted attempt 0, not hidden or counted as a valid trial.
+  No unsafe duplicate-runtime override was used.
+- A-side integration remains Kaiwen-owned: `agent.execute` does not yet route
+  `type="tune"` to this harness; use `pipeline.tune.run_study` directly.
+
+Real study: `logs/optuna/c6-real-20260830.db`, study `c6-real-20260830`, seed 42,
+LightGBM pointwise with `FIELDS`, learning rate 0.05, min-data-in-leaf 50,
+early-stopping rounds 5; searched leaves 15–63 and boosting rounds 10–30.
+
+```text
+Budget completed                    20 trials (12 completed, 8 pruned)
+Ledger attempts                     21 (includes 1 interrupted attempt)
+Best internal-fold primary          0.5654609124602713
+Best parameters                     num_leaves=62, num_boost_round=20
+Measured valid-attempt wall time    352.635093 seconds
+Estimated avoided fold time         82.94865025009494 seconds
+Estimated saving fraction           0.1904310055999246 (19.04%)
+30% saving acceptance gate          NOT MET — pending, not a completion claim
+```
+
+The estimate excludes interruption downtime; no extra model evaluations were
+run when reopening the study at its already-completed budget of 20.
+
+## C7 first pass implemented (2026-08-30)
+
+- Added four continuous per-user blend methods and Spearman diagnostics in
+  `pipeline/models/blend.py`; near-identical parents are refused.
+- Added `pipeline/blending.py` for node-based C1 integration. Only successful,
+  accepted nodes qualify. Weight selection uses internal-fold labels only.
+- Added atomic parent-score caching in `pipeline/train.py`, with cache artifacts
+  ignored by Git. Full evaluation reports explicit fold/official/bootstrap gates
+  and rejects a candidate that fails to beat both parents.
+- Cache keys include implementation/source-file identity; ordered prediction-row
+  fingerprints include only pre-outcome context. Stale, reordered, empty or
+  corrupt cache artifacts trigger recomputation, without loading pickled arrays.
+- Confirmation varies each parent configuration over five seeds. First-pass
+  parents must be two distinct accepted successful `full` config nodes; confirmed
+  seed-average parents, generated-code parents and nested blends fail explicitly
+  rather than silently changing what the named parent represents.
+- `pipeline/evidence.py` preserves blend diagnostics and refuses to promote a
+  failed C7 gate even if the headline primary beats the stated baseline.
+- C7 tests cover exact ranks, scipy-cross-checked Spearman, all four methods,
+  similarity rejection, fold-only weight fitting, deterministic full execution,
+  five-seed confirmation, each acceptance gate, and cache failure/replay behavior.
+- Real blend lift remains pending: `logs/nodes/` has no accepted parent records.
+  No synthetic node was presented as a real accepted experiment.
+
 ## Current dependencies and limits
 
 - B owns data loading, temporal folds, feature construction, and leakage checks.
   C1 must consume those interfaces without changing their frozen contracts.
-- D4 owns populated segment metrics. C1 currently returns the required empty
-  `segments` dictionary until D4 lands.
+- D4 segment metrics are available and reused by full C1 runs.
 - The dataset remains local and uncommitted.
-- C2 and C3 gates have passed. C4 may begin; C5-C7 remain dependent on the
-  preceding model implementations and validation gates.
+- Multi-task DeepFM remains explicitly unimplemented/deprioritized; it cannot
+  silently run the single-task model under a multi-task name.
+- Smoke now passes no validation labels to model fitting; official-validation
+  samples are prediction-only even in this correctness tier.
+- The new `origin/main` includes A6/A7, B7/B8 and D-readiness, including overlapping
+  LightGBM/DeepFM implementations. Reconcile deliberately before PR/merge; then
+  rerun the expanded suite and ensure the A loop carries C7's gate evidence.
+
+## Local macOS runtime
+
+This machine's LightGBM resolves Homebrew `libomp`; PyTorch ships a second
+`libomp`. Loading both caused native aborts (exit 134). Both libraries work when
+they resolve the same bundled runtime. For this checkout/venv, prepend this
+environment setting to tests and experiments:
+
+```sh
+DYLD_LIBRARY_PATH=/Users/quekee/Desktop/techjamEBK/.venv/lib/python3.14/site-packages/torch/lib .venv/bin/pytest -ra
+```
+
+Do not set `KMP_DUPLICATE_LIB_OK`. The environment setting is local to each
+command; no shell profile or system library was changed. Linux does not require
+this macOS-specific path.
+
+## Final verification (2026-08-30)
+
+Using the local runtime setting above:
+
+```text
+.venv/bin/pytest -ra                    286 passed in 67.33s; exit 0
+.venv/bin/ruff check .                  All checks passed; exit 0
+git diff --check                       exit 0
+.venv/bin/python -m tools.leak_demo     safe ACCEPTED, leaky QUARANTINED; exit 0
+.venv/bin/python -m tools.leak_demo --real
+                                       safe ACCEPTED, leaky QUARANTINED; exit 0
+```
+
+The 286 tests include the real Random, Popularity and FM reference gates.
+The real containment demo uses its random base model (full primary `0.4845`);
+this is not a feature-lift claim. Frozen plan/evaluator/submit diffs are empty.
+Independent review findings were reproduced with regression tests and fixed:
+trial crash isolation, live owner-kill recovery, parent-fidelity identity and
+corrupt-cache fallback. This verification covers this branch, not the newer
+unmerged `origin/main` changes.
+
+## Files changed in the C4–C7 continuation
+
+- Models: `pipeline/models/lgbm.py`, `pipeline/models/deepfm.py`,
+  `pipeline/models/fm.py`, `pipeline/models/blend.py`.
+- Integration/evidence: `pipeline/train.py`, `pipeline/tune.py`,
+  `pipeline/blending.py`, `pipeline/evidence.py`.
+- Tests: `tests/test_lgbm.py`, `tests/test_deepfm.py`, `tests/test_models.py`,
+  `tests/test_train.py`, `tests/test_tune.py`, `tests/test_blend.py`,
+  `tests/test_blend_runner.py`, `tests/test_score_cache.py`, `tests/test_evidence.py`.
+- Tracking: `.gitignore`, `ethanprogress.md`. Raw data, databases and score
+  archives remain ignored. Frozen evaluator/submit files and `AGENT_PLAN.md`
+  were not edited.
 
 ## Next action
 
-Commit and publish C3 when requested, then begin C4 LightGBM pointwise and
-LambdaRank implementations.
+Reconcile `origin/main`'s overlapping model implementations with this tested
+branch. Wire A-side tune dispatch and carry blend-gate evidence through the
+new A6 loop. Then register genuine accepted parents and measure C7 lift;
+continue C6 performance work toward the 30% saving gate without changing scores.
 
 ## Update log
+
+- 2026-08-30: Implemented C6 with subprocess-isolated fold pruning, real
+  owner-kill/resume, identity-checked SQLite storage and measured 20-trial
+  evidence. The 30% savings gate is explicitly unmet (19.04% estimated).
+- 2026-08-30: Completed the C7 first pass and C3b gate-evidence bridge. Fixed
+  smoke-tier early-stopping leakage, hardened score-cache provenance and
+  corruption fallback, and preserved both newly advanced remote work and all
+  local changes for deliberate reconciliation.
 
 - 2026-08-29: Pulled and integrated the A and B workstreams. Merged
   origin/main (A4 executor, A5 recovery, B4 fixes, B5 smoothing, D1-D2
@@ -203,3 +384,10 @@ LambdaRank implementations.
 - 2026-08-29: Implemented C3 FM, passed the organiser-equivalent `0.6016`
   reference gate, and verified leakage-safe C1 full-tier execution using an
   epoch budget selected only from internal temporal folds.
+- 2026-08-29: Implemented C4 LightGBM pointwise and LambdaRank. Both objectives
+  pass real internal-fold screens. The safe generated user-author affinity
+  passed containment but produced zero full-tier lift, disproving its first
+  benchmark hypothesis without promotion.
+- 2026-08-29: Implemented C5 DeepFM with deterministic CPU training,
+  patience `1`, and the O(n) FM identity. The first one-epoch real-data probe
+  completed in `5.61s`; its low score is recorded without promotion.

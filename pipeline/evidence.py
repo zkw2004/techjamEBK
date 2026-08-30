@@ -128,6 +128,19 @@ def evidence_record(
         raise ValueError("baseline_primary must be a number the candidate is judged against")
     delta = primary - float(baseline_primary)
     passed = delta >= min_delta
+    blend_detail = ""
+    if parsed_config["model"] == "blend":
+        blend_accepted = result.get("blend_accepted") is True
+        record["blend"] = {
+            "accepted": blend_accepted,
+            "gates": copy.deepcopy(result.get("blend_gates", {})),
+            "parent_correlation": result.get("parent_correlation"),
+            "weight": result.get("blend_weight"),
+            "confirmation_weights": result.get("blend_weights"),
+            "parent_primaries": result.get("parent_primaries"),
+        }
+        passed = passed and blend_accepted
+        blend_detail = f"; C7 parent/fold/bootstrap acceptance: {blend_accepted}"
     record["decision"] = {
         "passed": passed,
         "outcome": "pass" if passed else "fail",
@@ -138,7 +151,7 @@ def evidence_record(
             f"primary {primary:.4f} vs baseline {float(baseline_primary):.4f} "
             f"(delta {delta:+.4f}, floor {min_delta:.4f}); "
             f"fold primaries {[round(v, 4) for v in record['fold_primaries']]}; "
-            f"{len(record['segments'])} segment metrics recorded"
+            f"{len(record['segments'])} segment metrics recorded{blend_detail}"
         ),
     }
     return record
@@ -205,5 +218,6 @@ def to_node(
         "disproof_condition": record["disproof_condition"],
         "decision": record["decision"],
         "seed": record["seed"],
+        **({"blend": copy.deepcopy(record["blend"])} if "blend" in record else {}),
         **extra,
     }
