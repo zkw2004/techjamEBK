@@ -19,17 +19,21 @@ class LGBM:
         loss: str = "pointwise",
         seed: int = 42,
         feature_names: list[str] | None = None,
-        num_boost_round: int = 500,
+        num_boost_round: int | None = None,
         early_stopping_rounds: int = 20,
         **hparams,
     ):
         if loss not in {"pointwise", "lambdarank"}:
             raise ValueError("LightGBM loss must be 'pointwise' or 'lambdarank'")
+        # C1's fold-selected refit budget wins over the sklearn-style alias.
+        if num_boost_round is None:
+            num_boost_round = int(hparams.get("n_estimators", 500))
         if num_boost_round <= 0 or early_stopping_rounds < 0:
             raise ValueError("num_boost_round must be positive and early stopping non-negative")
         self.loss = loss
         self.seed = seed
         self.feature_names = list(feature_names or [])
+        self._infer_types = not self.feature_names
         self.num_boost_round = int(num_boost_round)
         self.early_stopping_rounds = int(early_stopping_rounds)
         self.hparams = {
@@ -73,6 +77,10 @@ class LGBM:
                 raise ValueError("train and validation matrices must have the same field count")
             encoded_val = self._encode(X_val)
 
+        if groups is None and self.loss == "lambdarank":
+            if not self._infer_types and self.feature_names[0] != "user_id":
+                raise ValueError("lambdarank requires explicit user ids in groups")
+            groups = (X_train[:, 0], None if X_val is None else X_val[:, 0])
         train_users, validation_users = self._split_groups(groups, len(X_train), X_val)
         train_group = validation_group = None
         if self.loss == "lambdarank":
@@ -160,7 +168,13 @@ class LGBM:
         self.unknown_ids = []
         self.categorical_features = []
         for index, name in enumerate(self.feature_names):
-            if name not in FIELDS:
+            categorical = name in FIELDS
+            if self._infer_types:
+                try:
+                    np.asarray(X[:, index], dtype=float)
+                except (TypeError, ValueError):
+                    categorical = True
+            if not categorical:
                 self.vocabs.append(None)
                 self.unknown_ids.append(None)
                 continue
@@ -191,20 +205,28 @@ class LGBM:
     def _split_groups(groups, train_rows: int, X_val):
         if groups is None:
             return None, None
-        if not isinstance(groups, tuple) or len(groups) != 2:
-            raise ValueError("groups must be a (train_user_ids, validation_user_ids) tuple")
+        if isinstance(groups, dict):
+            groups = (groups["train"], groups.get("val"))
+        if not isinstance(groups, (tuple, list)) or len(groups) != 2:
+            raise ValueError("groups must contain train and validation user ids")
         train_users, validation_users = groups
         train_users = np.asarray(train_users)
-        if len(train_users) != train_rows:
+        if train_users.ndim != 1 or len(train_users) != train_rows:
             raise ValueError("training groups must have one user id per row")
         if X_val is None:
             if validation_users is not None:
                 raise ValueError("validation groups require validation data")
             return train_users, None
         validation_users = np.asarray(validation_users)
-        if len(validation_users) != len(X_val):
+        if validation_users.ndim != 1 or len(validation_users) != len(X_val):
             raise ValueError("validation groups must have one user id per row")
         return train_users, validation_users
+
+    @staticmethod
+    def _group_sizes(user_ids: np.ndarray) -> np.ndarray:
+        if user_ids.ndim != 1:
+            raise ValueError("ranking group ids must be one-dimensional")
+        return np.asarray(LGBM._group_order(user_ids)[1], dtype=np.int32)
 
     @staticmethod
     def _group_order(user_ids: np.ndarray) -> tuple[np.ndarray, list[int]]:

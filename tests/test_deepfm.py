@@ -2,11 +2,23 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 import torch
 
 from pipeline.models.deepfm import DeepFMModel
+
+
+def test_registry_import_does_not_initialize_torch_in_non_neural_workers():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys; import pipeline.models; "
+         "assert 'torch' not in sys.modules"],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_deprioritized_multitask_model_does_not_masquerade_as_single_task():

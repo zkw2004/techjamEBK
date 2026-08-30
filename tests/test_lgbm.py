@@ -3,8 +3,40 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from pipeline.models.lgbm import LGBM
+
+
+@pytest.mark.parametrize("budget, expected", [({"n_estimators": 7}, 7),
+                                             ({"n_estimators": 7, "num_boost_round": 3}, 3)])
+def test_estimator_alias_respects_explicit_final_refit_budget(budget, expected):
+    X, y = _learnable_rows()
+    model = LGBM(**budget, min_data_in_leaf=1)
+    model.fit(X, y, None, None)
+    assert model.best_epoch == expected
+
+
+def test_lambdarank_direct_use_defaults_to_first_user_field():
+    X, y = _learnable_rows()
+    model = LGBM(loss="lambdarank", n_estimators=4, min_data_in_leaf=1)
+    model.fit(X, y, None, None)
+    assert model.predict(X[:2])[0] > model.predict(X[:2])[1]
+
+
+@pytest.mark.parametrize("hparams, expected", [({"n_estimators": 7}, 7),
+                                              ({"n_estimators": 7, "num_boost_round": 3}, 3),
+                                              ({"n_estimators": 900}, 200)])
+def test_screen_and_tuning_caps_preserve_requested_estimator_budget(hparams, expected):
+    from agent.schema import Config
+    from pipeline.train import _new_model, _screen_config
+
+    config = Config(model="lgbm", hparams={**hparams, "min_data_in_leaf": 1}).model_dump()
+    model = _new_model(_screen_config(config), seed=42)
+    X, y = _learnable_rows()
+    model.fit(X, y, None, None)
+    assert model.best_epoch == expected
+    assert config["hparams"] == {**hparams, "min_data_in_leaf": 1}
 
 
 def _learnable_rows(repeats: int = 30) -> tuple[np.ndarray, np.ndarray]:

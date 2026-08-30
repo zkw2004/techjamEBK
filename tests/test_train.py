@@ -4,6 +4,62 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
+
+
+@pytest.mark.parametrize("strategy, expected_rows", [("all", 12), ("in_session", 4),
+                                                   ("pop_weighted", 10)])
+def test_runner_samples_training_only_and_keeps_full_feature_history(
+    monkeypatch, strategy, expected_rows,
+):
+    from agent.schema import Config
+    from pipeline import train
+
+    frame = pd.DataFrame({
+        "user_id": [0, 0, 1, 1] + [2] * 8,
+        "video_id": np.arange(12),
+        "date": [20220408] * 12,
+        "tab": [0] * 12,
+        "long_view": [1, 0, 1, 0] + [0] * 8,
+    })
+    validation = frame.iloc[[3, 1]].copy()
+    prediction = frame.iloc[[10, 2, 7]].copy()
+    fits, histories = [], []
+
+    class CapturingModel:
+        def fit(self, X, y, X_val, y_val, groups=None):
+            fits.append((X.copy(), y.copy(), X_val.copy(), y_val.copy(), groups))
+
+        def predict(self, X):
+            return X[:, 0]
+
+    def history_feature(history, target):
+        histories.append(history["video_id"].tolist())
+        # B5 selects its strict historical path by frame identity for training.
+        return np.full(len(target), 1 if history is target else 0)
+
+    from pipeline import features
+    monkeypatch.setitem(features.FEATURES, "history_size_probe", history_feature)
+    monkeypatch.setattr(train, "_new_model", lambda *_: CapturingModel())
+    config = Config(model="lgbm", features=["video_id", "history_size_probe"],
+                    negative_sampling=strategy).model_dump()
+    original = frame.copy(deep=True)
+    for _ in range(2):
+        outputs = train._fit_and_predict(config, frame, validation, [prediction], seed=7)
+        np.testing.assert_array_equal(outputs[0], [10, 2, 7])
+    X, y, X_val, y_val, groups = fits[0]
+    assert len(X) == expected_rows
+    assert y.sum() == 2
+    np.testing.assert_array_equal(X[:, 1], np.ones(expected_rows))
+    assert set(X[y == 1, 0]) == {0, 2}
+    if strategy == "in_session":
+        np.testing.assert_array_equal(X[:, 0], [0, 1, 2, 3])
+    np.testing.assert_array_equal(X, fits[1][0])
+    np.testing.assert_array_equal(X_val[:, 0], [3, 1])
+    np.testing.assert_array_equal(y_val, [0, 0])
+    np.testing.assert_array_equal(groups[0], frame.iloc[X[:, 0].astype(int)].user_id)
+    assert all(history == list(range(12)) for history in histories)
+    pd.testing.assert_frame_equal(frame, original)
 
 
 class TinySeedModel:

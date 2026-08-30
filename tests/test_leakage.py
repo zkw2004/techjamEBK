@@ -112,6 +112,19 @@ def test_legitimate_historical_aggregate_passes(leakage_train_df, leakage_target
     assert leakage_check(user_ctr_decayed, leakage_train_df, leakage_target_df) is True
 
 
+def test_legal_in_sample_historical_aggregate_passes():
+    """Training rows may use labels from strictly earlier event timestamps."""
+    frame = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u2"],
+            "long_view": [1, 0, 1],
+            "time_ms": [100, 200, 300],
+        }
+    )
+
+    assert leakage_check(user_ctr, frame, frame) is True
+
+
 def test_probe_only_gate_would_miss_a_direct_target_label_read(
     leakage_train_df, leakage_target_df
 ):

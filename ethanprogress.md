@@ -15,12 +15,14 @@ estimates explicitly rather than presenting them as measured speedups.
 
 - Last updated: 2026-08-30
 - Branch: `codex/continue-c-workflow`
-- Active task: Reconcile newer `main` and finish the pending acceptance gates
+- Active task: Latest-main integration verified; real D5 benchmark running
 - Implementation commit: `3fb2186` (local only; not pushed or merged)
 - Integration base: `60cb273`, the latest fetched `main` when this branch began.
   Handoff commits `6c78c2d` and `a8fbc9a` were explicitly carried forward.
-- Remote change noticed at completion: `origin/main` is now `44c05e5` and
-  contains overlapping C4/C5 edits. No merge/reset/stash was attempted.
+- Latest integration: fetched `origin/main` at `44c05e5` with a clean working
+-  tree; merge was reconciled on this branch. Four overlapping files were
+  reconciled, retaining both branches' model tests and C-workflow safeguards.
+  No reset, stash, discard, or unrelated branch switch was used.
 
 ## Task tracker
 
@@ -345,13 +347,73 @@ unmerged `origin/main` changes.
 
 ## Next action
 
-Reconcile `origin/main`'s overlapping model implementations with this tested
-branch. Wire A-side tune dispatch and carry blend-gate evidence through the
-new A6 loop. Then register genuine accepted parents and measure C7 lift;
-continue C6 performance work toward the 30% saving gate without changing scores.
+Finish the running D5 real-data benchmark and record its results below.
+Coordinate A-side tune dispatch and blend-gate evidence propagation through
+the new A6 loop with Kaiwen (handoff section 11 reserves this hook for A).
+Then register genuine accepted parents and measure C7 lift; continue C6
+performance work toward the 30% saving gate without changing scores.
+
+## Latest-main integration verification (2026-08-30)
+
+Test runtime: Python 3.12.13 in `.venv-c-workflow`, isolated from the original
+Python 3.14 environment. The latest main explicitly requires Python <3.13.
+On this Mac, use the same single-OpenMP-runtime workaround with the new path:
+
+```sh
+DYLD_LIBRARY_PATH=/Users/quekee/Desktop/techjamEBK/.venv-c-workflow/lib/python3.12/site-packages/torch/lib .venv-c-workflow/bin/pytest -ra
+```
+
+- Full suite: **366 passed in 127.04s**, no skips; exit 0.
+- `.venv-c-workflow/bin/ruff check .`: all checks passed; exit 0.
+- `git diff --check`: exit 0; frozen plan/evaluator/submission files unchanged.
+- `.venv-c-workflow/bin/python -m pip check`: no broken requirements.
+- Synthetic and real `tools.leak_demo`: safe ACCEPTED, leaky QUARANTINED; exit 0.
+- Refreshed official validation reference scores: Random five-seed mean
+  `0.483388350987886`; Popularity `0.5807219293342971`; organiser-equivalent
+  FM `0.6014687563529677` (within `0.6016 ± 0.0008`). The tiny FM difference
+  from the earlier runtime does not change the gate. This reference FM test
+  reproduces organiser stopping; production C1 still selects epochs on folds.
+- Independent scoped review: two findings reproduced, fixed, retested, and
+  approved on re-review. No remaining Critical/Important findings in the merge.
+- D5 real screen benchmark with 30 FM tuning trials is running; scores pending.
+
+Files in this integration, relative to the previous local commit:
+
+- Reconciled/continued: `.gitignore`, `ethanprogress.md`,
+  `pipeline/models/deepfm.py`, `pipeline/models/lgbm.py`, `pipeline/train.py`,
+  `tools/probes.py`, `tests/test_deepfm.py`, `tests/test_lgbm.py`,
+  `tests/test_models.py`, `tests/test_train.py`, `tests/test_probes.py`.
+- Incoming main preserved: `agent/knowledge.md`, `agent/loop.py`,
+  `pipeline/data.py`, `pipeline/features.py`, `pyproject.toml`, `uv.lock`,
+  `tools/report.py`, `tests/test_knowledge.py`, `tests/test_leakage.py`,
+  `tests/test_loop.py`, `tests/test_negative_sampling.py`,
+  `tests/test_randomised_exposure.py`, `tests/test_report.py`,
+  `tests/test_select_parent.py`.
 
 ## Update log
 
+- 2026-08-30: Reconciled incoming C4/C5 model interfaces and tests. LightGBM
+  accepts direct categorical matrices, dict/tuple user groups and `n_estimators`
+  while C1's fold-selected `num_boost_round` wins for final refits. DeepFM
+  retains numeric bucketing, fixed-budget refits and explicit MTL deferral,
+  and adopts main's lazy Torch loading. Regression run before lazy-load fix:
+  40 passed, 1 expected failure; all three main LGBM failures were resolved.
+  Added an ignored Python 3.12 `.venv-c-workflow` because main now requires
+  Python <3.13; the old `.venv` is untouched. Final verification pending.
+- 2026-08-30: Connected B7 sampling to C1 after building full historical
+  training features. Validation/test rows and feature history remain unchanged.
+  Tests first reproduced ignored `in_session`/`pop_weighted` settings (2 failed,
+  1 passed). D5 P5 now uses the existing C6 tuner instead of its duplicate
+  objective, preventing `--fidelity full` from tuning on official validation.
+  Added SQLite resume and failed-study coverage. Targeted combined verification:
+  33 passed in 19.16s. The integrated suite then passed 362 tests in 122.78s.
+- 2026-08-30: Independent merge review exposed two interface defects, both
+  reproduced before fixing: screen caps overrode a small `n_estimators` budget,
+  and P5 study-lock errors prevented the results table. Normalize the budget
+  alias before capping; retain P1-P4 and a visible P5 error on ordinary storage
+  failures. Covering tests: 9 LightGBM tests passed in 0.70s, 4 probe tests
+  passed in 1.15s. Ruff and diff checks passed. Real leakage demo again accepted
+  the safe feature and quarantined its twin (not a numeric lift claim).
 - 2026-08-30: Implemented C6 with subprocess-isolated fold pruning, real
   owner-kill/resume, identity-checked SQLite storage and measured 20-trial
   evidence. The 30% savings gate is explicitly unmet (19.04% estimated).

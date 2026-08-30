@@ -1,49 +1,50 @@
-"""DeepFM in PyTorch. Task C5. Skeleton: Appendix A.4.
-
-CPU in under 10 min, early stopping patience 1 (trap 11: CTR models peak
-after 1-3 epochs then degrade). The order-2 term MUST use the O(n) identity
-0.5 * ((sum v)^2 - sum v^2), not a naive quadratic loop.
-"""
+"""CPU-first DeepFM with the Appendix A.4 linear-time interaction term."""
 
 from __future__ import annotations
 
 import numpy as np
-import torch
-from torch import nn
 
 from pipeline.models import register
 
 
-class _DeepFMNetwork(nn.Module):
-    def __init__(self, field_dims, emb_dim: int, mlp_dims, dropout: float):
-        super().__init__()
-        self.embeddings = nn.ModuleList([nn.Embedding(dim, emb_dim) for dim in field_dims])
-        self.linear = nn.ModuleList([nn.Embedding(dim, 1) for dim in field_dims])
-        self.bias = nn.Parameter(torch.zeros(1))
+def _network(field_dims, emb_dim: int, mlp_dims, dropout: float):
+    """Build lazily so importing the registry does not initialise Torch."""
+    import torch
+    from torch import nn
 
-        layers = []
-        input_dim = len(field_dims) * emb_dim
-        for hidden_dim in mlp_dims:
-            layers.extend([nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)])
-            input_dim = hidden_dim
-        layers.append(nn.Linear(input_dim, 1))
-        self.mlp = nn.Sequential(*layers)
+    class Network(nn.Module):
+        def __init__(self, field_dims, emb_dim: int, mlp_dims, dropout: float):
+            super().__init__()
+            self.embeddings = nn.ModuleList([nn.Embedding(dim, emb_dim) for dim in field_dims])
+            self.linear = nn.ModuleList([nn.Embedding(dim, 1) for dim in field_dims])
+            self.bias = nn.Parameter(torch.zeros(1))
 
-    def forward(self, X):
-        embeddings = torch.stack(
-            [embedding(X[:, index]) for index, embedding in enumerate(self.embeddings)],
-            dim=1,
-        )
-        order_one = (
-            torch.stack(
-                [linear(X[:, index]) for index, linear in enumerate(self.linear)],
-                dim=0,
-            ).sum(dim=0)
-            + self.bias
-        )
-        order_two = DeepFMModel._second_order(embeddings)
-        deep = self.mlp(embeddings.flatten(start_dim=1))
-        return (order_one + order_two + deep).squeeze(1)
+            layers = []
+            input_dim = len(field_dims) * emb_dim
+            for hidden_dim in mlp_dims:
+                layers.extend([nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)])
+                input_dim = hidden_dim
+            layers.append(nn.Linear(input_dim, 1))
+            self.mlp = nn.Sequential(*layers)
+
+        def forward(self, X):
+            embeddings = torch.stack(
+                [embedding(X[:, index]) for index, embedding in enumerate(self.embeddings)],
+                dim=1,
+            )
+            order_one = (
+                torch.stack(
+                    [linear(X[:, index]) for index, linear in enumerate(self.linear)],
+                    dim=0,
+                ).sum(dim=0)
+                + self.bias
+            )
+            order_two = DeepFMModel._second_order(embeddings)
+            deep = self.mlp(embeddings.flatten(start_dim=1))
+            return (order_one + order_two + deep).squeeze(1)
+
+
+    return Network(field_dims, emb_dim, mlp_dims, dropout)
 
 
 @register("deepfm")
@@ -85,10 +86,13 @@ class DeepFMModel:
         self.vocabs: list[dict[object, int] | None] = []
         self.numeric_edges: list[np.ndarray | None] = []
         self.field_dims: list[int] = []
-        self.network: _DeepFMNetwork | None = None
+        self.network = None
         self.best_epoch: int | None = None
 
     def fit(self, X_train, y_train, X_val, y_val, groups=None) -> None:
+        import torch
+        from torch import nn
+
         del groups
         X_train = np.asarray(X_train, dtype=object)
         y_train = np.asarray(y_train, dtype=np.float32)
@@ -114,7 +118,7 @@ class DeepFMModel:
 
         torch.set_num_threads(self.num_threads)
         torch.manual_seed(self.seed)
-        self.network = _DeepFMNetwork(
+        self.network = _network(
             self.field_dims,
             self.emb_dim,
             self.mlp_dims,
@@ -161,6 +165,8 @@ class DeepFMModel:
             self.network.load_state_dict(best_state)
 
     def predict(self, X) -> np.ndarray:
+        import torch
+
         if self.network is None:
             raise RuntimeError("fit() must be called before predict()")
         X = np.asarray(X, dtype=object)
@@ -229,6 +235,8 @@ class DeepFMModel:
         return encoded
 
     def _validation_loss(self, X: np.ndarray, y: np.ndarray, loss_fn) -> float:
+        import torch
+
         encoded = torch.as_tensor(X, dtype=torch.long)
         labels = torch.as_tensor(y, dtype=torch.float32)
         total = 0.0

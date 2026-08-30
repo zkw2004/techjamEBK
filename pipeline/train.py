@@ -346,6 +346,23 @@ def _fit_and_predict(
     model = _new_model(config, seed)
     train_matrix = _matrix(train_frame, train_frame, features)
     train_labels = _column(train_frame, LABEL)
+    train_users = _column(train_frame, "user_id")
+    if config.get("negative_sampling", "all") != "all":
+        from pipeline.data import sample_negatives
+
+        # Build historical features BEFORE selecting examples. B5 uses frame
+        # identity for strictly past-only training aggregates; using the sampled
+        # frame as target would accidentally expose later training outcomes.
+        selected = sample_negatives(
+            train_frame.reset_index(drop=True),
+            strategy=config["negative_sampling"],
+            seed=seed,
+        ).index.to_numpy()
+        if not len(selected):
+            raise ValueError("negative sampling selected no training rows")
+        train_matrix = train_matrix[selected]
+        train_labels = train_labels[selected]
+        train_users = train_users[selected]
 
     if validation_frame is None:
         validation_matrix = validation_labels = None
@@ -353,7 +370,6 @@ def _fit_and_predict(
         validation_matrix = _matrix(train_frame, validation_frame, features)
         validation_labels = _column(validation_frame, LABEL)
 
-    train_users = _column(train_frame, "user_id")
     validation_users = (
         None if validation_frame is None else _column(validation_frame, "user_id")
     )
@@ -472,6 +488,8 @@ def _mean_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
 
 def _screen_config(config: dict) -> dict:
     reduced = {**config, "hparams": dict(config["hparams"])}
+    if config.get("model") == "lgbm" and "n_estimators" in reduced["hparams"]:
+        reduced["hparams"].setdefault("num_boost_round", reduced["hparams"]["n_estimators"])
     for name, cap in SCREEN_BUDGET_CAPS.items():
         current = reduced["hparams"].get(name, cap)
         if isinstance(current, bool) or not isinstance(current, Real) or current <= 0:
