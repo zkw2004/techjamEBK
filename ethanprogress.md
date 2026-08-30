@@ -166,6 +166,43 @@ real result to report, not a failure of the harness — propose → execute →
 evidence → falsification ran unattended and refused to promote a change that
 did not clear the noise floor.
 
+## Sustained-use soak, 2026-08-30
+
+Every test so far called `run_experiment` a handful of times; an unattended
+run calls it hundreds of times in one process. A 120-iteration soak across
+all four fast families and all three tiers found the runner clean on the
+axes that usually fail:
+
+```text
+iterations            120, errors 0
+peak RSS              81.9MB -> 84.7MB   (+2.8MB, no leak)
+open descriptors      4 -> 4             (no pipe/process leak)
+zombie children       0                  (workers reaped correctly)
+```
+
+One real defect: **the score cache never evicts.** Entries are keyed by
+(config, fidelity, seed, code fingerprint), so every experiment adds one and
+nothing replaces one. A real full-tier entry is ~2.3MB — 124,909 validation
+plus 170,588 test scores — so an unattended 40-iteration run writes ~90MB and
+the confirm tier's five seeds per candidate push it past 400MB. Local runs had
+already accumulated 30MB. `_evict_score_cache` now drops least-recently-used
+entries past a 512MB budget on every write. Losing an entry is never
+incorrect — `_read_score_cache` returns None and the caller refits — so this
+trades a possible refit for a bounded footprint, and a test asserts the
+recomputed result matches what the cache would have served.
+
+`tests/test_soak.py` covers the leak axes, determinism under repetition, and
+eviction ordering.
+
+### Ledger hygiene
+
+The C7 validation parents had been committed into `logs/nodes/`. That
+directory is the graded run-log deliverable, and those two nodes carried a
+placeholder `manifest_sha256` and an `accepted` flag no gate ever granted —
+precisely what the Section 7.2 trust boundary forbids. They are removed from
+the repository. `tools/make_blend_parents.py` regenerates them into a
+temporary store on demand and refuses to write into `logs/`.
+
 ## C6 pruning gate met, 2026-08-30
 
 The study was saving 19.04% against a 30% acceptance criterion. Instrumenting
