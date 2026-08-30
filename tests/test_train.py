@@ -4,6 +4,62 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pytest
+
+
+@pytest.mark.parametrize("strategy, expected_rows", [("all", 12), ("in_session", 4),
+                                                   ("pop_weighted", 10)])
+def test_runner_samples_training_only_and_keeps_full_feature_history(
+    monkeypatch, strategy, expected_rows,
+):
+    from agent.schema import Config
+    from pipeline import train
+
+    frame = pd.DataFrame({
+        "user_id": [0, 0, 1, 1] + [2] * 8,
+        "video_id": np.arange(12),
+        "date": [20220408] * 12,
+        "tab": [0] * 12,
+        "long_view": [1, 0, 1, 0] + [0] * 8,
+    })
+    validation = frame.iloc[[3, 1]].copy()
+    prediction = frame.iloc[[10, 2, 7]].copy()
+    fits, histories = [], []
+
+    class CapturingModel:
+        def fit(self, X, y, X_val, y_val, groups=None):
+            fits.append((X.copy(), y.copy(), X_val.copy(), y_val.copy(), groups))
+
+        def predict(self, X):
+            return X[:, 0]
+
+    def history_feature(history, target):
+        histories.append(history["video_id"].tolist())
+        # B5 selects its strict historical path by frame identity for training.
+        return np.full(len(target), 1 if history is target else 0)
+
+    from pipeline import features
+    monkeypatch.setitem(features.FEATURES, "history_size_probe", history_feature)
+    monkeypatch.setattr(train, "_new_model", lambda *_: CapturingModel())
+    config = Config(model="lgbm", features=["video_id", "history_size_probe"],
+                    negative_sampling=strategy).model_dump()
+    original = frame.copy(deep=True)
+    for _ in range(2):
+        outputs = train._fit_and_predict(config, frame, validation, [prediction], seed=7)
+        np.testing.assert_array_equal(outputs[0], [10, 2, 7])
+    X, y, X_val, y_val, groups = fits[0]
+    assert len(X) == expected_rows
+    assert y.sum() == 2
+    np.testing.assert_array_equal(X[:, 1], np.ones(expected_rows))
+    assert set(X[y == 1, 0]) == {0, 2}
+    if strategy == "in_session":
+        np.testing.assert_array_equal(X[:, 0], [0, 1, 2, 3])
+    np.testing.assert_array_equal(X, fits[1][0])
+    np.testing.assert_array_equal(X_val[:, 0], [3, 1])
+    np.testing.assert_array_equal(y_val, [0, 0])
+    np.testing.assert_array_equal(groups[0], frame.iloc[X[:, 0].astype(int)].user_id)
+    assert all(history == list(range(12)) for history in histories)
+    pd.testing.assert_frame_equal(frame, original)
 
 
 class TinySeedModel:
@@ -49,6 +105,29 @@ class FoldEpochModel(FullSeedModel):
 
     def predict(self, X):
         return np.full(len(X), float(self.max_epochs))
+
+
+class FoldBoostingRoundModel(FullSeedModel):
+    def __init__(self, seed=42, num_boost_round=40, **hparams):
+        super().__init__(seed=seed)
+        self.num_boost_round = num_boost_round
+        self.best_epoch = None
+
+    def fit(self, X_train, y_train, X_val, y_val, groups=None):
+        if X_val is not None:
+            self.best_epoch = self.seed
+
+    def predict(self, X):
+        return np.full(len(X), float(self.num_boost_round))
+
+
+class GroupCaptureModel(FullSeedModel):
+    def __init__(self):
+        super().__init__()
+        self.groups = None
+
+    def fit(self, X_train, y_train, X_val, y_val, groups=None):
+        self.groups = groups
 
 
 def _frame(rows: int, offset: int = 0) -> dict[str, np.ndarray]:
@@ -122,6 +201,17 @@ def test_smoke_caps_training_at_1000_rows_and_skips_metrics(monkeypatch):
     assert result["fold_primaries"] == []
 
 
+def test_smoke_does_not_supply_official_validation_for_early_stopping(monkeypatch):
+    class NoOfficialValidation(TinySeedModel):
+        def fit(self, X_train, y_train, X_val, y_val, groups=None):
+            assert X_val is None and y_val is None
+
+    train = _install_fixture_backend(monkeypatch, NoOfficialValidation)
+    result = train.run_experiment({"model": "random"}, fidelity="smoke")
+
+    assert result["status"] == "ok", result
+
+
 def test_screen_scores_exactly_three_internal_folds(monkeypatch):
     train = _install_fixture_backend(monkeypatch, FullSeedModel)
 
@@ -178,6 +268,34 @@ def test_full_refit_uses_median_best_epoch_selected_on_internal_folds(monkeypatc
 
     assert result["status"] == "ok"
     np.testing.assert_array_equal(result["val_scores"], np.full(6, 10.0))
+
+
+def test_full_refit_uses_fold_selected_lightgbm_boosting_rounds(monkeypatch):
+    train = _install_fixture_backend(monkeypatch, FoldBoostingRoundModel)
+
+    result = train.run_experiment(
+        {"model": "lgbm", "hparams": {"num_boost_round": 40}},
+        fidelity="full",
+        seed=9,
+    )
+
+    assert result["status"] == "ok"
+    np.testing.assert_array_equal(result["val_scores"], np.full(6, 10.0))
+
+
+def test_fit_and_predict_passes_train_and_validation_user_ids_as_groups(monkeypatch):
+    import pipeline.train as train
+
+    model = GroupCaptureModel()
+    training, validation, _ = _pandas_data()
+    monkeypatch.setattr(train, "_new_model", lambda config, seed: model)
+    config = {"features": ["user_id", "video_id"]}
+
+    train._fit_and_predict(config, training, validation, [validation], seed=1)
+
+    train_users, validation_users = model.groups
+    np.testing.assert_array_equal(train_users, training["user_id"].to_numpy())
+    np.testing.assert_array_equal(validation_users, validation["user_id"].to_numpy())
 
 
 def test_raw_label_cannot_be_selected_as_a_feature(monkeypatch):

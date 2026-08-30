@@ -21,6 +21,27 @@ class BaseModel(Protocol):
 
 MODEL_REGISTRY: dict[str, type[BaseModel]] = {}
 
+# --- Native backend declaration (OpenMP isolation) --------------------------
+#
+# torch ships its own `libomp.dylib`; LightGBM links the system one. Loading
+# both into one process aborts the interpreter outright:
+#
+#     OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib
+#     already initialized.
+#
+# It is a hard SIGABRT in either import order, not an exception, so nothing
+# in Python can catch it — the process simply dies and the C1 parent sees a
+# closed pipe. Every model therefore declares which native runtime it pulls
+# in, and the runner keeps a process committed to at most one of them.
+# macOS-specific in practice (Linux CI shares a single libgomp), which is
+# exactly why CI stays green while a developer or demo laptop crashes.
+BACKENDS = ("torch", "lightgbm")
+
+
+def backend(name: str) -> str | None:
+    """The native runtime a model loads, or None when it is pure numpy."""
+    return getattr(MODEL_REGISTRY.get(name), "native_backend", None)
+
 
 def register(name: str):
     """Decorator adding a model class to MODEL_REGISTRY."""

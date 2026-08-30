@@ -180,6 +180,26 @@ def test_fm_training_is_deterministic_and_unseen_categories_are_supported():
     assert np.isfinite(first).all()
 
 
+def test_fm_accepts_runner_train_and_validation_group_tuple():
+    X_train = np.asarray(
+        [["u1", "v1"], ["u1", "v2"], ["u2", "v1"], ["u2", "v2"]],
+        dtype=object,
+    )
+    y_train = np.asarray([1, 0, 0, 1], dtype=float)
+    model = FM(k=2, max_epochs=1, batch_size=2, seed=5)
+
+    model.fit(
+        X_train,
+        y_train,
+        X_train,
+        y_train,
+        groups=(X_train[:, 0], X_train[:, 0]),
+    )
+
+    assert np.isfinite(model.predict(X_train)).all()
+
+
+@pytest.mark.native_backend("lightgbm")
 @pytest.mark.parametrize("loss", ["pointwise", "lambdarank"])
 def test_lgbm_objectives_learn_with_categorical_features(loss):
     X_train = np.asarray(
@@ -215,6 +235,7 @@ def test_lambdarank_group_sizes_cover_each_row_once():
     assert sizes.sum() == 5
 
 
+@pytest.mark.native_backend("torch")
 def test_deepfm_learns_a_repeated_pattern_and_handles_unknown_categories():
     positive = ["u1", "v-good", "home"]
     negative = ["u2", "v-bad", "search"]
@@ -234,6 +255,7 @@ def test_deepfm_learns_a_repeated_pattern_and_handles_unknown_categories():
     assert 1 <= model.best_epoch <= 8
 
 
+@pytest.mark.native_backend("torch")
 def test_deepfm_is_deterministic_for_a_fixed_seed():
     X = np.asarray([["u1", "a"], ["u1", "b"], ["u2", "a"], ["u2", "b"]] * 3)
     y = np.asarray([1, 0, 0, 1] * 3, dtype=np.float32)

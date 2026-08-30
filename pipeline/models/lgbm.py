@@ -14,151 +14,226 @@ from pipeline.models import register
 
 @register("lgbm")
 class LGBM:
-    def __init__(self, loss: str = "pointwise", seed: int = 42, **hparams):
+    native_backend = "lightgbm"  # see pipeline/models/__init__.py BACKENDS
+
+    def __init__(
+        self,
+        loss: str = "pointwise",
+        seed: int = 42,
+        feature_names: list[str] | None = None,
+        num_boost_round: int | None = None,
+        early_stopping_rounds: int = 20,
+        **hparams,
+    ):
         if loss not in {"pointwise", "lambdarank"}:
-            raise ValueError("LGBM loss must be 'pointwise' or 'lambdarank'")
-        self.loss, self.seed, self.hparams = loss, seed, hparams
-        self.model = None
-        self.encoders: list[dict[object, int]] = []
+            raise ValueError("LightGBM loss must be 'pointwise' or 'lambdarank'")
+        # C1's fold-selected refit budget wins over the sklearn-style alias.
+        if num_boost_round is None:
+            num_boost_round = int(hparams.get("n_estimators", 500))
+        if num_boost_round <= 0 or early_stopping_rounds < 0:
+            raise ValueError("num_boost_round must be positive and early stopping non-negative")
+        self.loss = loss
+        self.seed = seed
+        self.feature_names = list(feature_names or [])
+        self._infer_types = not self.feature_names
+        self.num_boost_round = int(num_boost_round)
+        self.early_stopping_rounds = int(early_stopping_rounds)
+        self.hparams = {
+            name: value
+            for name, value in hparams.items()
+            if name
+            not in {
+                "epochs",
+                "max_epochs",
+                "n_estimators",
+                "num_trials",
+            }
+        }
+        self.vocabs: list[dict[object, int] | None] = []
+        self.unknown_ids: list[int | None] = []
+        self.categorical_features: list[int] = []
+        self.booster = None
         self.best_epoch: int | None = None
 
+    def fit(self, X_train, y_train, X_val, y_val, groups=None) -> None:
+        import lightgbm as lgb
+
+        X_train = np.asarray(X_train, dtype=object)
+        y_train = np.asarray(y_train, dtype=float)
+        self._validate_xy(X_train, y_train, "train")
+        if (X_val is None) != (y_val is None):
+            raise ValueError("X_val and y_val must either both be provided or both be None")
+        if not self.feature_names:
+            self.feature_names = [f"field_{index}" for index in range(X_train.shape[1])]
+        if len(self.feature_names) != X_train.shape[1]:
+            raise ValueError("feature_names must match the matrix field count")
+
+        self._fit_encoder(X_train)
+        encoded_train = self._encode(X_train)
+        encoded_val = None
+        if X_val is not None:
+            X_val = np.asarray(X_val, dtype=object)
+            y_val = np.asarray(y_val, dtype=float)
+            self._validate_xy(X_val, y_val, "validation")
+            if X_val.shape[1] != X_train.shape[1]:
+                raise ValueError("train and validation matrices must have the same field count")
+            encoded_val = self._encode(X_val)
+
+        if groups is None and self.loss == "lambdarank":
+            if not self._infer_types and self.feature_names[0] != "user_id":
+                raise ValueError("lambdarank requires explicit user ids in groups")
+            groups = (X_train[:, 0], None if X_val is None else X_val[:, 0])
+        train_users, validation_users = self._split_groups(groups, len(X_train), X_val)
+        train_group = validation_group = None
+        if self.loss == "lambdarank":
+            if train_users is None:
+                raise ValueError("lambdarank requires training user ids in groups")
+            order, train_group = self._group_order(train_users)
+            encoded_train = encoded_train[order]
+            y_train = y_train[order]
+            if encoded_val is not None:
+                if validation_users is None:
+                    raise ValueError("lambdarank validation requires validation user ids")
+                validation_order, validation_group = self._group_order(validation_users)
+                encoded_val = encoded_val[validation_order]
+                y_val = y_val[validation_order]
+
+        train_set = lgb.Dataset(
+            encoded_train,
+            label=y_train,
+            group=train_group,
+            categorical_feature=self.categorical_features,
+            free_raw_data=False,
+        )
+        valid_sets = []
+        if encoded_val is not None:
+            valid_sets.append(
+                lgb.Dataset(
+                    encoded_val,
+                    label=y_val,
+                    group=validation_group,
+                    categorical_feature=self.categorical_features,
+                    reference=train_set,
+                    free_raw_data=False,
+                )
+            )
+
+        params = {
+            "objective": "binary" if self.loss == "pointwise" else "lambdarank",
+            "metric": "binary_logloss" if self.loss == "pointwise" else "ndcg",
+            "verbosity": -1,
+            "seed": self.seed,
+            "feature_fraction_seed": self.seed,
+            "bagging_seed": self.seed,
+            "data_random_seed": self.seed,
+            "deterministic": True,
+            "force_row_wise": True,
+            "num_threads": 1,
+            **self.hparams,
+        }
+        if self.loss == "lambdarank":
+            params.update(label_gain=[0, 1], eval_at=[5])
+        callbacks = [lgb.log_evaluation(0)]
+        if valid_sets and self.early_stopping_rounds:
+            callbacks.append(lgb.early_stopping(self.early_stopping_rounds, verbose=False))
+        self.booster = lgb.train(
+            params,
+            train_set,
+            num_boost_round=self.num_boost_round,
+            valid_sets=valid_sets,
+            callbacks=callbacks,
+        )
+        self.best_epoch = self.booster.best_iteration or self.num_boost_round
+
+    def predict(self, X) -> np.ndarray:
+        if self.booster is None:
+            raise RuntimeError("fit() must be called before predict()")
+        X = np.asarray(X, dtype=object)
+        if X.ndim != 2 or X.shape[1] != len(self.feature_names):
+            raise ValueError("X must be two-dimensional with the fitted field count")
+        return np.asarray(
+            self.booster.predict(self._encode(X), num_iteration=self.best_epoch),
+            dtype=float,
+        )
+
     @staticmethod
-    def _as_2d(X, name: str) -> np.ndarray:
-        values = np.asarray(X, dtype=object)
-        if values.ndim != 2:
-            raise ValueError(f"{name} must be a 2-D feature matrix")
-        return values
+    def _validate_xy(X: np.ndarray, y: np.ndarray, name: str) -> None:
+        if X.ndim != 2 or len(X) == 0:
+            raise ValueError(f"{name} matrix must be non-empty and two-dimensional")
+        if y.ndim != 1 or len(X) != len(y) or not np.isfinite(y).all():
+            raise ValueError(f"{name} labels must be finite with one value per row")
 
-    def _fit_encoders(self, X: np.ndarray) -> np.ndarray:
-        encoded = np.empty(X.shape, dtype=np.float64)
-        self.encoders = []
-        for column in range(X.shape[1]):
-            values = X[:, column]
-            try:
-                numeric = values.astype(np.float64)
-            except (TypeError, ValueError):
-                categories = {value: index for index, value in enumerate(dict.fromkeys(values))}
-                self.encoders.append(categories)
-                encoded[:, column] = [categories[value] for value in values]
-            else:
-                self.encoders.append({})
-                encoded[:, column] = numeric
-        if not np.isfinite(encoded).all():
-            raise ValueError("LightGBM features must be finite")
-        return encoded
+    def _fit_encoder(self, X: np.ndarray) -> None:
+        from pipeline.data import FIELDS
 
-    def _transform(self, X: np.ndarray) -> np.ndarray:
-        if len(self.encoders) != X.shape[1]:
-            raise ValueError("prediction feature count differs from training")
-        encoded = np.empty(X.shape, dtype=np.float64)
-        for column, categories in enumerate(self.encoders):
-            values = X[:, column]
-            if categories:
-                encoded[:, column] = [categories.get(value, -1) for value in values]
-            else:
+        self.vocabs = []
+        self.unknown_ids = []
+        self.categorical_features = []
+        for index, name in enumerate(self.feature_names):
+            categorical = name in FIELDS
+            if self._infer_types:
                 try:
-                    encoded[:, column] = values.astype(np.float64)
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(f"feature column {column} must remain numeric") from exc
-        if not np.isfinite(encoded).all():
-            raise ValueError("LightGBM features must be finite")
+                    np.asarray(X[:, index], dtype=float)
+                except (TypeError, ValueError):
+                    categorical = True
+            if not categorical:
+                self.vocabs.append(None)
+                self.unknown_ids.append(None)
+                continue
+            vocab = {}
+            for value in X[:, index]:
+                if value not in vocab:
+                    vocab[value] = len(vocab)
+            self.vocabs.append(vocab)
+            self.unknown_ids.append(len(vocab))
+            self.categorical_features.append(index)
+
+    def _encode(self, X: np.ndarray) -> np.ndarray:
+        encoded = np.empty(X.shape, dtype=np.float64)
+        for index, vocab in enumerate(self.vocabs):
+            if vocab is None:
+                values = np.asarray(X[:, index], dtype=float)
+                if not np.isfinite(values).all():
+                    raise ValueError(
+                        f"numeric feature {self.feature_names[index]!r} must be finite"
+                    )
+                encoded[:, index] = values
+            else:
+                unknown = self.unknown_ids[index]
+                encoded[:, index] = [vocab.get(value, unknown) for value in X[:, index]]
         return encoded
+
+    @staticmethod
+    def _split_groups(groups, train_rows: int, X_val):
+        if groups is None:
+            return None, None
+        if isinstance(groups, dict):
+            groups = (groups["train"], groups.get("val"))
+        if not isinstance(groups, (tuple, list)) or len(groups) != 2:
+            raise ValueError("groups must contain train and validation user ids")
+        train_users, validation_users = groups
+        train_users = np.asarray(train_users)
+        if train_users.ndim != 1 or len(train_users) != train_rows:
+            raise ValueError("training groups must have one user id per row")
+        if X_val is None:
+            if validation_users is not None:
+                raise ValueError("validation groups require validation data")
+            return train_users, None
+        validation_users = np.asarray(validation_users)
+        if validation_users.ndim != 1 or len(validation_users) != len(X_val):
+            raise ValueError("validation groups must have one user id per row")
+        return train_users, validation_users
 
     @staticmethod
     def _group_sizes(user_ids: np.ndarray) -> np.ndarray:
         if user_ids.ndim != 1:
             raise ValueError("ranking group ids must be one-dimensional")
-        _, counts = np.unique(user_ids, return_counts=True)
-        return counts.astype(np.int32)
+        return np.asarray(LGBM._group_order(user_ids)[1], dtype=np.int32)
 
     @staticmethod
-    def _group_ids(groups, X_train: np.ndarray, X_val: np.ndarray | None):
-        """Resolve train/validation user ids without changing the frozen fit signature."""
-        if isinstance(groups, dict):
-            return np.asarray(groups["train"]), np.asarray(groups.get("val"))
-        if isinstance(groups, (tuple, list)) and len(groups) == 2:
-            return np.asarray(groups[0]), np.asarray(groups[1])
-        # The frozen runner's default feature order starts with user_id. This
-        # fallback keeps direct model use ergonomic; callers with another
-        # ordering must pass explicit group ids.
-        train_ids = np.asarray(X_train[:, 0])
-        val_ids = None if X_val is None else np.asarray(X_val[:, 0])
-        return train_ids, val_ids
-
-    def fit(self, X_train, y_train, X_val, y_val, groups=None) -> None:
-        import lightgbm as lgb
-
-        raw_train = self._as_2d(X_train, "X_train")
-        labels = np.asarray(y_train, dtype=np.float64)
-        if len(raw_train) != len(labels):
-            raise ValueError("X_train and y_train must align")
-        raw_val = None if X_val is None else self._as_2d(X_val, "X_val")
-        val_labels = None if y_val is None else np.asarray(y_val, dtype=np.float64)
-        if raw_val is not None and (val_labels is None or len(raw_val) != len(val_labels)):
-            raise ValueError("X_val and y_val must align")
-
-        train = self._fit_encoders(raw_train)
-        validation = None if raw_val is None else self._transform(raw_val)
-        train_group = val_group = None
-        if self.loss == "lambdarank":
-            train_users, val_users = self._group_ids(groups, raw_train, raw_val)
-            if len(train_users) != len(train):
-                raise ValueError("training group ids must align with X_train")
-            train_order = np.argsort(train_users, kind="stable")
-            train, labels = train[train_order], labels[train_order]
-            train_group = self._group_sizes(train_users[train_order])
-            if validation is not None:
-                if val_users is None or len(val_users) != len(validation):
-                    raise ValueError("validation group ids must align with X_val")
-                val_order = np.argsort(val_users, kind="stable")
-                validation, val_labels = validation[val_order], val_labels[val_order]
-                val_group = self._group_sizes(val_users[val_order])
-
-        num_boost_round = int(self.hparams.get("n_estimators", 300))
-        params = {
-            "learning_rate": float(self.hparams.get("learning_rate", 0.05)),
-            "num_leaves": int(self.hparams.get("num_leaves", 63)),
-            "min_data_in_leaf": int(self.hparams.get("min_data_in_leaf", 20)),
-            "bagging_fraction": float(self.hparams.get("bagging_fraction", 1.0)),
-            "feature_fraction": float(self.hparams.get("feature_fraction", 1.0)),
-            "lambda_l2": float(self.hparams.get("lambda_l2", 0.0)),
-            "seed": self.seed,
-            "num_threads": int(self.hparams.get("n_jobs", 1)),
-            "verbosity": -1,
-            "objective": "lambdarank" if self.loss == "lambdarank" else "binary",
-            "metric": "ndcg" if self.loss == "lambdarank" else "binary_logloss",
-            "deterministic": True,
-            "force_col_wise": True,
-        }
-        train_set = lgb.Dataset(train, label=labels, group=train_group, free_raw_data=False)
-        valid_sets = None
-        callbacks = []
-        if validation is not None:
-            valid_set = lgb.Dataset(
-                validation,
-                label=val_labels,
-                group=val_group,
-                reference=train_set,
-                free_raw_data=False,
-            )
-            valid_sets = [valid_set]
-            patience = int(self.hparams.get("early_stopping_rounds", 20))
-            if patience > 0:
-                callbacks.append(lgb.early_stopping(patience, verbose=False))
-        if self.loss == "lambdarank":
-            params["eval_at"] = [5]
-        self.model = lgb.train(
-            params,
-            train_set,
-            num_boost_round=num_boost_round,
-            valid_sets=valid_sets,
-            callbacks=callbacks,
-        )
-        self.best_epoch = int(self.model.best_iteration or num_boost_round)
-
-    def predict(self, X) -> np.ndarray:
-        if self.model is None:
-            raise RuntimeError("fit() must be called before predict()")
-        matrix = self._transform(self._as_2d(X, "X"))
-        scores = self.model.predict(matrix, num_iteration=self.best_epoch)
-        return np.asarray(scores, dtype=np.float64)
+    def _group_order(user_ids: np.ndarray) -> tuple[np.ndarray, list[int]]:
+        order = np.argsort(user_ids.astype(str), kind="stable")
+        sorted_users = user_ids[order].astype(str)
+        boundaries = np.flatnonzero(sorted_users[1:] != sorted_users[:-1]) + 1
+        counts = np.diff(np.r_[0, boundaries, len(sorted_users)]).astype(int).tolist()
+        return order, counts

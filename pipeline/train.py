@@ -7,16 +7,21 @@ MUST NOT raise. MUST enforce timeout_s. MUST be deterministic given seed.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import multiprocessing as mp
 import os
 import random
 import resource
 import signal
 import sys
+import tempfile
 import time
 import traceback as traceback_module
 from collections.abc import Mapping
 from numbers import Real
+from pathlib import Path
+from zipfile import BadZipFile
 
 import numpy as np
 from pydantic import ValidationError
@@ -38,6 +43,8 @@ SCREEN_BUDGET_CAPS = {
     "num_trials": 5,
 }
 
+SCORE_CACHE_DIR = Path("logs/scores")
+
 
 class LeakSuspectedError(RuntimeError):
     def __init__(self, primary: float):
@@ -47,6 +54,15 @@ class LeakSuspectedError(RuntimeError):
         )
 
 
+class BackendConflictError(ValueError):
+    """A run would co-load two OpenMP runtimes in one process.
+
+    Classified `schema`, not `transient`: the conflict is a deterministic
+    property of the config, so retrying it can never succeed and A5 must not
+    spend the recovery budget on it.
+    """
+
+
 class FeatureLeakError(ValueError):
     """A feature failed the pre-training leakage guard (B6).
 
@@ -54,6 +70,122 @@ class FeatureLeakError(ValueError):
     schema errors a repair attempt, and a leak must be quarantined rather
     than regenerated until it slips past the guard.
     """
+
+
+def _cache_code_fingerprint() -> str:
+    """Invalidate derived scores when implementation or source-file identity changes."""
+    from pipeline.data import DATA_DIR, LOG_FILES
+
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    paths = list(root.glob("*.py")) + list((root / "models").glob("*.py"))
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(path.read_bytes())
+    for filename in (*LOG_FILES, "video_features_basic_pure.csv"):
+        path = DATA_DIR / filename
+        if path.is_file():
+            stat = path.stat()
+            digest.update(f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    return digest.hexdigest()
+
+
+def _frame_fingerprint(frame) -> str:
+    """Hash prediction row identity/context only; never inspect target outcomes."""
+    digest = hashlib.sha256()
+    for name in ("user_id", "video_id", "author_id", "date", "time_ms", "tab", "duration_ms"):
+        if _has_column(frame, name):
+            values = _column(frame, name).astype(str)
+            digest.update(f"{name}:{values.shape}:{values.dtype}".encode())
+            digest.update(np.ascontiguousarray(values).tobytes())
+    return digest.hexdigest()
+
+
+def _score_cache_key(config: dict, fidelity: str, seed: int) -> str:
+    payload = json.dumps(
+        {"config": config, "fidelity": fidelity, "seed": seed,
+         "implementation": _cache_code_fingerprint()},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _score_cache_path(config: dict, fidelity: str, seed: int) -> Path:
+    return SCORE_CACHE_DIR / f"{_score_cache_key(config, fidelity, seed)}.npz"
+
+
+def _write_score_cache(config: dict, fidelity: str, seed: int, result: dict,
+                       validation_frame=None, test_frame=None) -> Path:
+    """Atomically persist only the score arrays needed by a future blend."""
+    path = _score_cache_path(config, fidelity, seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".npz", delete=False) as handle:
+        temporary = Path(handle.name)
+        np.savez_compressed(
+            handle,
+            val_scores=np.asarray(result["val_scores"]),
+            val_user_ids=np.asarray(result["val_user_ids"]),
+            test_scores=np.asarray(result["test_scores"]),
+            validation_fingerprint=(
+                "" if validation_frame is None else _frame_fingerprint(validation_frame)
+            ),
+            test_fingerprint="" if test_frame is None else _frame_fingerprint(test_frame),
+        )
+    os.replace(temporary, path)
+    return path
+
+
+def _read_score_cache(config: dict, fidelity: str, seed: int,
+                      validation_frame=None, test_frame=None) -> dict | None:
+    path = _score_cache_path(config, fidelity, seed)
+    if not path.is_file():
+        return None
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            for frame, name in ((validation_frame, "validation_fingerprint"),
+                                (test_frame, "test_fingerprint")):
+                if frame is not None and (
+                    name not in archive or str(archive[name]) != _frame_fingerprint(frame)
+                ):
+                    return None
+            result = {name: archive[name].copy()
+                      for name in ("val_scores", "val_user_ids", "test_scores")}
+        if any(array.ndim != 1 for array in result.values()):
+            return None
+        if len(result["val_scores"]) != len(result["val_user_ids"]):
+            return None
+        if not all(np.isfinite(result[key]).all() for key in ("val_scores", "test_scores")):
+            return None
+        return result
+    except (ValueError, OSError, KeyError, EOFError, BadZipFile):
+        return None
+
+
+def _parent_config(node_id: str) -> dict:
+    from agent import store
+
+    try:
+        node = store.read(node_id)
+    except FileNotFoundError as exc:
+        # An absent node is permanent: the ledger is append-only, so a node
+        # that is missing now will never appear. Left as an OSError it would
+        # classify `transient`, and A5 would retry a blend that can never
+        # resolve until the dead-node cap forced a branch.
+        raise ValueError(
+            f"blend parent {node_id!r} does not exist in the node ledger"
+        ) from exc
+    node = dict(node)
+    if node.get("status") != "ok" or not node.get("accepted"):
+        raise ValueError(f"blend parent {node_id!r} must be an accepted successful node")
+    if node.get("fidelity") != "full":
+        raise ValueError("C7 first-pass parents must be full-fidelity nodes, not seed averages")
+    if node.get("action_type") == "code":
+        raise ValueError("generated-code parents require source replay before they can be blended")
+    config = Config(**node.get("config", {})).model_dump()
+    if config["model"] == "blend":
+        raise ValueError("nested blend parents are not supported in the first C7 pass")
+    return config
 
 
 def _error_record(
@@ -85,9 +217,51 @@ def _classify_exception(exc: BaseException) -> str:
     return "transient"
 
 
+def _config_backends(config: dict) -> set[str]:
+    """Native runtimes this config will load, following blends to their parents."""
+    from pipeline.models import backend
+
+    if config["model"] != "blend":
+        return {backend(config["model"])} - {None}
+    backends = set()
+    for node_id in config.get("parents", []):
+        try:
+            parent = _parent_config(node_id)
+        except (KeyError, OSError, ValueError):
+            continue  # resolution errors surface later with a better message
+        backends |= _config_backends(parent)
+    return backends
+
+
+def _assert_single_backend(config: dict) -> None:
+    """Refuse a run that would load two OpenMP runtimes into one process.
+
+    torch and LightGBM each link their own libomp; co-loading them aborts the
+    interpreter with OMP Error #15 (see pipeline/models/__init__.py). An abort
+    is uncatchable, so the parent would only see a dead child and classify it
+    `transient` — which A5 retries with backoff, burning the budget on a
+    failure that can never succeed. Failing here instead is deterministic,
+    explains itself, and classifies as a schema error that A5 does not retry.
+    """
+    backends = _config_backends(config)
+    if len(backends) > 1:
+        raise BackendConflictError(
+            f"this run needs both {' and '.join(sorted(backends))} in one process; "
+            "torch and LightGBM link separate OpenMP runtimes and co-loading them "
+            "aborts the interpreter (OMP Error #15). Blend their cached full-tier "
+            "scores instead of refitting mixed-backend parents together, or run the "
+            "parents in separate experiments first so the score cache is warm."
+        )
+
+
 def _execute_tier(config: dict, fidelity: str, seed: int) -> dict:
     """Execute one fidelity tier inside the isolated child process."""
-    _seed_everything(seed)
+    _assert_single_backend(config)
+    _seed_everything(seed, config)
+    if config["model"] == "blend":
+        from pipeline.blending import run_blend
+
+        return run_blend(config, fidelity, seed)
     if fidelity == "smoke":
         return _run_smoke(config, seed)
     if fidelity == "screen":
@@ -99,10 +273,24 @@ def _execute_tier(config: dict, fidelity: str, seed: int) -> dict:
     raise ValueError(f"unsupported fidelity {fidelity!r}")
 
 
-def _seed_everything(seed: int) -> None:
+def _seed_everything(seed: int, config: dict | None = None) -> None:
+    """Seed every RNG this run can touch.
+
+    Torch is seeded only when the run actually needs it. Importing torch
+    unconditionally used to co-load its libomp alongside LightGBM's and abort
+    the process, so every LightGBM experiment died before training (see
+    `_assert_single_backend`). `config=None` keeps the historical behaviour
+    for callers that seed without a config in hand.
+    """
     random.seed(seed)
     np.random.seed(seed)
     os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    if config is not None and "torch" not in _config_backends(config):
+        return
+    if config is None and "torch" not in sys.modules:
+        # Nothing has committed this process to torch; importing it now could
+        # be the very co-load that aborts the interpreter.
+        return
     try:
         import torch
     except ImportError:
@@ -210,6 +398,7 @@ def _new_model(config: dict, seed: int):
         parents=config["parents"],
         blend_method=config["blend_method"],
         negative_sampling=config["negative_sampling"],
+        feature_names=config["features"],
     )
     return model_class(**kwargs)
 
@@ -228,6 +417,33 @@ def _fit_and_predict(
     model = _new_model(config, seed)
     train_matrix = _matrix(train_frame, train_frame, features)
     train_labels = _column(train_frame, LABEL)
+    train_users = _column(train_frame, "user_id")
+    # Validate centrally, not per model. RandomModel ignores its labels
+    # entirely, so a corrupt or empty training column used to "train"
+    # successfully for it while every other family raised — the one model
+    # that cannot detect bad data was the one reporting a score from it.
+    # Both conditions are permanent, so they must classify `schema` rather
+    # than the `transient` an unguarded failure would produce.
+    if len(train_labels) == 0:
+        raise ValueError("cannot fit a model on an empty training frame")
+    if not np.isfinite(np.asarray(train_labels, dtype=np.float64)).all():
+        raise ValueError(f"training column {LABEL!r} must contain only finite values")
+    if config.get("negative_sampling", "all") != "all":
+        from pipeline.data import sample_negatives
+
+        # Build historical features BEFORE selecting examples. B5 uses frame
+        # identity for strictly past-only training aggregates; using the sampled
+        # frame as target would accidentally expose later training outcomes.
+        selected = sample_negatives(
+            train_frame.reset_index(drop=True),
+            strategy=config["negative_sampling"],
+            seed=seed,
+        ).index.to_numpy()
+        if not len(selected):
+            raise ValueError("negative sampling selected no training rows")
+        train_matrix = train_matrix[selected]
+        train_labels = train_labels[selected]
+        train_users = train_users[selected]
 
     if validation_frame is None:
         validation_matrix = validation_labels = None
@@ -235,13 +451,16 @@ def _fit_and_predict(
         validation_matrix = _matrix(train_frame, validation_frame, features)
         validation_labels = _column(validation_frame, LABEL)
 
-    groups = None
-    if config["model"] == "lgbm" and config["loss"] == "lambdarank":
-        groups = {
-            "train": _column(train_frame, "user_id"),
-            "val": None if validation_frame is None else _column(validation_frame, "user_id"),
-        }
-    model.fit(train_matrix, train_labels, validation_matrix, validation_labels, groups=groups)
+    validation_users = (
+        None if validation_frame is None else _column(validation_frame, "user_id")
+    )
+    model.fit(
+        train_matrix,
+        train_labels,
+        validation_matrix,
+        validation_labels,
+        groups=(train_users, validation_users),
+    )
     if fit_summaries is not None:
         fit_summaries.append({"best_epoch": getattr(model, "best_epoch", None)})
     outputs = []
@@ -256,10 +475,30 @@ def _fit_and_predict(
 
 
 def _evaluate(frame, scores: np.ndarray) -> dict[str, float]:
+    """Score one frame with the immutable starter-kit evaluator.
+
+    The evaluator is deliberately total: it returns GAUC 0.5 for a set with no
+    rankable user and nDCG 0.0 for an empty one, so an empty or corrupt
+    evaluation frame yields a *plausible-looking* primary (0.25 empty, 0.75
+    all-positive) instead of an error. Those are fabrications — nothing was
+    measured — and the agent has no way to tell them from a real score. Refuse
+    them here, uniformly for every model, rather than letting each model's own
+    validation decide (RandomModel ignores labels entirely, so NaN labels used
+    to pass for it and fail for everything else).
+    """
     from pipeline.data import LABEL
     from pipeline.evaluate import evaluate
 
-    raw = evaluate(_column(frame, "user_id"), _column(frame, LABEL), scores)
+    user_ids = _column(frame, "user_id")
+    labels = _column(frame, LABEL)
+    if len(user_ids) == 0:
+        raise ValueError("cannot score an empty evaluation frame")
+    if len(labels) != len(user_ids) or len(scores) != len(user_ids):
+        raise ValueError("labels, user ids, and scores must be aligned one-to-one")
+    numeric_labels = np.asarray(labels, dtype=np.float64)
+    if not np.isfinite(numeric_labels).all():
+        raise ValueError(f"evaluation column {LABEL!r} must contain only finite values")
+    raw = evaluate(user_ids, labels, scores)
     return {
         "gauc": float(raw["GAUC"]),
         "ndcg": float(raw["nDCG@5"]),
@@ -298,7 +537,7 @@ def _run_smoke(config: dict, seed: int) -> dict:
     validation_scores, test_scores = _fit_and_predict(
         config,
         train_sample,
-        validation_sample,
+        None,
         [validation_sample, test_sample],
         seed,
     )
@@ -350,6 +589,8 @@ def _mean_metrics(metrics: list[dict[str, float]]) -> dict[str, float]:
 
 def _screen_config(config: dict) -> dict:
     reduced = {**config, "hparams": dict(config["hparams"])}
+    if config.get("model") == "lgbm" and "n_estimators" in reduced["hparams"]:
+        reduced["hparams"].setdefault("num_boost_round", reduced["hparams"]["n_estimators"])
     for name, cap in SCREEN_BUDGET_CAPS.items():
         current = reduced["hparams"].get(name, cap)
         if isinstance(current, bool) or not isinstance(current, Real) or current <= 0:
@@ -417,11 +658,12 @@ def _run_full(config: dict, seed: int) -> dict:
     fold_metrics, _, _, best_epochs = _score_folds(config, seed)
     refit_config = config
     if best_epochs:
+        budget_name = "num_boost_round" if config["model"] == "lgbm" else "max_epochs"
         refit_config = {
             **config,
             "hparams": {
                 **config["hparams"],
-                "max_epochs": int(np.median(best_epochs)),
+                budget_name: int(np.median(best_epochs)),
             },
         }
     train_frame, validation_frame, test_frame = _load_data()
@@ -433,7 +675,7 @@ def _run_full(config: dict, seed: int) -> dict:
         seed,
     )
     metrics = _evaluate(validation_frame, validation_scores)
-    return _success(
+    result = _success(
         "full",
         **metrics,
         fold_primaries=[item["primary"] for item in fold_metrics],
@@ -442,13 +684,18 @@ def _run_full(config: dict, seed: int) -> dict:
         val_user_ids=_column(validation_frame, "user_id"),
         test_scores=test_scores,
     )
+    if metrics["primary"] > LEAK_CANARY_PRIMARY:
+        raise LeakSuspectedError(metrics["primary"])
+    _write_score_cache(config, "full", seed, result,
+                       validation_frame=validation_frame, test_frame=test_frame)
+    return result
 
 
 def _run_confirm(config: dict, seed: int) -> dict:
     runs = []
     for offset in range(5):
         run_seed = seed + offset
-        _seed_everything(run_seed)
+        _seed_everything(run_seed, config)
         run = _run_full(config, run_seed)
         if run["primary"] > LEAK_CANARY_PRIMARY:
             raise LeakSuspectedError(run["primary"])
@@ -514,6 +761,32 @@ def _stop_process(process) -> None:
     if process.is_alive():
         process.kill()
         process.join(PROCESS_STOP_GRACE_S)
+
+
+def _child_death_report(process, exc: BaseException) -> str:
+    """Explain a worker that died without sending a result.
+
+    A bare `EOFError` says only that the pipe closed. When the child was
+    killed by a signal the exit code carries the reason, and a native abort
+    (SIGABRT) is nearly always two OpenMP runtimes co-loaded — worth naming,
+    because the traceback is the only place that diagnosis can surface.
+    """
+    detail = "".join(traceback_module.format_exception_only(type(exc), exc)).strip()
+    exitcode = process.exitcode if process is not None else None
+    if exitcode is None or exitcode >= 0:
+        return f"{detail}\nworker exited with code {exitcode} before sending a result"
+    try:
+        name = signal.Signals(-exitcode).name
+    except ValueError:
+        name = f"signal {-exitcode}"
+    hint = ""
+    if -exitcode in (signal.SIGABRT, signal.SIGSEGV, signal.SIGBUS):
+        hint = (
+            "\nA native crash, not a transient fault. The usual cause is two "
+            "OpenMP runtimes in one process (torch + LightGBM, OMP Error #15) — "
+            "check the model's native_backend declaration."
+        )
+    return f"{detail}\nworker killed by {name} (exit {exitcode}){hint}"
 
 
 def _result_schema_issue(result: dict, fidelity: str) -> str | None:
@@ -653,7 +926,7 @@ def run_experiment(
                 fidelity,
                 error_class,
                 started,
-                "".join(traceback_module.format_exception_only(type(exc), exc)),
+                _child_death_report(process, exc),
             )
         finally:
             process.join(PROCESS_STOP_GRACE_S)

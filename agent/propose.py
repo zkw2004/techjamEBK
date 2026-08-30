@@ -62,12 +62,22 @@ def set_client(client: Any | None) -> None:
 
 
 def _get_client() -> Any:
-    """Lazily construct a real client, so importing this module never needs a key."""
+    """Lazily construct a real client, so importing this module never needs a key.
+
+    Identity-linked API keys are rejected with a 400 unless the request names
+    the workspace it acts in, so `ANTHROPIC_WORKSPACE_ID` is forwarded as a
+    header when it is set. Absent, the client behaves exactly as before —
+    ordinary keys need no workspace.
+    """
     global _client
     if _client is None:
+        import os
+
         import anthropic
 
-        _client = anthropic.Anthropic()
+        workspace = os.environ.get("ANTHROPIC_WORKSPACE_ID", "").strip()
+        headers = {"anthropic-workspace-id": workspace} if workspace else None
+        _client = anthropic.Anthropic(default_headers=headers)
     return _client
 
 

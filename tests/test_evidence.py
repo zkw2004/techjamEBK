@@ -165,3 +165,23 @@ def test_to_node_round_trips_through_the_append_only_store(monkeypatch, tmp_path
     assert loaded["decision"]["outcome"] == "pass"
     assert loaded["seed"] == 6
     assert loaded["accepted"] is True
+
+
+@pytest.mark.parametrize("blend_accepted", [False, True])
+def test_blend_evidence_cannot_promote_a_candidate_rejected_by_parent_gates(
+    monkeypatch, blend_accepted,
+):
+    train = _install(monkeypatch)
+    result = train.run_experiment(CONFIG, fidelity="full", seed=6)
+    result.update(blend_accepted=blend_accepted, parent_correlation=0.8,
+                  blend_gates={"folds": blend_accepted, "official": True, "bootstrap": True})
+    config = {"model": "blend", "parents": ["n001", "n002"]}
+
+    record = evidence_record(HYPOTHESIS, DISPROOF, config, "full", 6, result,
+                             baseline_primary=0.0)
+    node = to_node(record, parent="n001", family="ensemble", action_type="blend")
+
+    assert record["decision"]["passed"] is blend_accepted
+    assert node["accepted"] is blend_accepted
+    assert node["blend"]["gates"]["folds"] is blend_accepted
+    assert node["blend"]["parent_correlation"] == 0.8

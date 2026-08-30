@@ -13,6 +13,7 @@ submissions/*.csv
 __pycache__/
 *.py[cod]
 .venv/
+.venv-c-workflow/
 venv/
 *.egg-info/
 .pytest_cache/
@@ -22,6 +23,8 @@ venv/
 *.db
 *.sqlite3
 .optuna/
+logs/scores/*.npz
+logs/optuna/*.lock
 
 # os / editor
 .DS_Store

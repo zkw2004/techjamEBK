@@ -10,6 +10,8 @@ Total compute budget: under one hour.
 from __future__ import annotations
 
 import argparse
+import time
+import traceback
 from collections.abc import Callable
 from typing import Any
 
@@ -46,48 +48,53 @@ PROBES: dict[str, dict[str, Any]] = {
 }
 
 
-def _tune_fm(runner: Callable[..., dict], fidelity: str, trials: int, seed: int) -> dict:
-    """Run the P5 Optuna probe and return one normal experiment result."""
-    import optuna
+def _tune_fm(
+    runner: Callable[..., dict], fidelity: str, trials: int, seed: int, storage: str,
+) -> dict:
+    """Reuse C6's bounded, resumable internal-fold study, then evaluate once.
 
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    Even with --fidelity full the official validation labels never enter the
+    objective. The same seed is used across trials to compare configurations.
+    """
+    from pipeline.train import _cache_code_fingerprint
+    from pipeline.tune import run_study
 
-    def objective(trial):
-        config = {
-            **PROBES["P5"]["config"],
-            "hparams": {
-                "k": trial.suggest_categorical("k", [8, 16, 32, 64]),
-                "lr": trial.suggest_float("lr", 1e-4, 1e-2, log=True),
-                "l2": trial.suggest_float("l2", 1e-6, 1e-3, log=True),
-                "max_epochs": trial.suggest_int("max_epochs", 1, 5),
-            },
-        }
-        result = runner(config, fidelity=fidelity, seed=seed + trial.number)
-        if result.get("status") != "ok" or result.get("primary") is None:
-            raise optuna.TrialPruned()
-        return float(result["primary"])
-
-    study = optuna.create_study(
-        direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=seed),
-        pruner=optuna.pruners.MedianPruner(),
+    started = time.monotonic()
+    study = run_study(
+        PROBES["P5"]["config"],
+        {"k": ["categorical", [8, 16, 32, 64]],
+         "lr": ["loguniform", 1e-4, 1e-2],
+         "l2": ["loguniform", 1e-6, 1e-3],
+         "max_epochs": ["int", 1, 3]},
+        budget=trials, seed=seed, storage=storage,
+        study_name=f"d5-p5-{seed}-{_cache_code_fingerprint()[:16]}",
     )
-    study.optimize(objective, n_trials=trials)
-    if not study.best_trials:
-        return {"status": "error", "error_class": "transient", "primary": None}
-    config = {**PROBES["P5"]["config"], "hparams": study.best_params}
+    if study["best_value"] is None:
+        return {"status": "error", "error_class": "transient", "primary": None,
+                "seconds": time.monotonic() - started, "tuning": study}
+    config = {**PROBES["P5"]["config"], "hparams": study["best_params"]}
     result = runner(config, fidelity=fidelity, seed=seed)
-    return {**result, "trials": trials, "best_hparams": study.best_params}
+    return {**result, "trials": trials, "best_hparams": study["best_params"],
+            "seconds": time.monotonic() - started, "tuning": study}
 
 
 def run_probes(
     runner: Callable[..., dict], *, fidelity: str = "screen", fm_trials: int = 30, seed: int = 42,
+    study_storage: str = "sqlite:///logs/optuna/probes.db",
 ) -> list[dict[str, Any]]:
     """Run P1-P5 in fixed order; failures remain visible in the table."""
     rows = []
     for index, (probe_id, spec) in enumerate(PROBES.items()):
         if probe_id == "P5":
-            result = _tune_fm(runner, fidelity, fm_trials, seed + index)
+            started = time.monotonic()
+            try:
+                result = _tune_fm(runner, fidelity, fm_trials, seed + index, study_storage)
+            except Exception:
+                # A locked/unavailable study is not a failed model trial. Keep
+                # P1-P4 visible and let an interrupted process still exit.
+                result = {"status": "error", "error_class": "transient",
+                          "seconds": time.monotonic() - started,
+                          "traceback": traceback.format_exc()}
         else:
             result = runner(spec["config"], fidelity=fidelity, seed=seed + index)
         rows.append(
@@ -100,6 +107,8 @@ def run_probes(
                 "primary": result.get("primary"),
                 "seconds": result.get("seconds", 0.0),
                 "error_class": result.get("error_class", ""),
+                **({"traceback": result["traceback"]} if "traceback" in result else {}),
+                **({"tuning": result["tuning"]} if "tuning" in result else {}),
             }
         )
     return rows
@@ -137,6 +146,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--fidelity", choices=("screen", "full"), default="screen")
     parser.add_argument("--fm-trials", type=int, default=30)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--study-storage", default="sqlite:///logs/optuna/probes.db")
     args = parser.parse_args(argv)
     if args.fm_trials <= 0:
         parser.error("--fm-trials must be positive")
@@ -144,6 +154,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(render_table(run_probes(
         run_experiment, fidelity=args.fidelity, fm_trials=args.fm_trials, seed=args.seed,
+        study_storage=args.study_storage,
     )))
 
 
