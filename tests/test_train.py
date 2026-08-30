@@ -411,3 +411,25 @@ def test_confirm_averages_five_consecutive_seeds(monkeypatch):
     np.testing.assert_array_equal(result["val_scores"], np.full(6, 12.0))
     np.testing.assert_array_equal(result["test_scores"], np.full(5, 12.0))
     assert len(result["fold_primaries"]) == 3
+
+
+def test_not_implemented_error_classifies_as_schema_not_transient():
+    """model="deepfm_mtl" raises NotImplementedError (pipeline/models/deepfm.py).
+
+    It used to fall through _classify_exception's catch-all and come back as
+    "transient", which sends A5 into three rounds of backoff-and-retry on the
+    exact same config - guaranteed to fail every time, since retrying does not
+    change what model was asked for. "schema" instead gets one repair attempt
+    with a *different* config, which can actually succeed.
+    """
+    from pipeline.train import _classify_exception
+
+    exc = NotImplementedError("multi-task DeepFM is deprioritized; use model='deepfm'")
+    assert _classify_exception(exc) == "schema"
+
+
+def test_classify_exception_still_falls_back_to_transient():
+    """A genuine unrecognised failure (e.g. a network error) is not schema."""
+    from pipeline.train import _classify_exception
+
+    assert _classify_exception(ConnectionError("connection reset")) == "transient"
