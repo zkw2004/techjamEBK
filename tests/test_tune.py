@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import optuna
 import pytest
@@ -272,3 +274,93 @@ def test_killed_owner_releases_lock_and_terminates_its_worker(monkeypatch, tmp_p
                 os.kill(worker_pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+# --- C6 pruning-savings accounting ------------------------------------------
+
+
+def test_skipped_folds_are_priced_at_their_own_index_not_the_running_mean():
+    """The internal folds are expanding windows, so fold 3 costs more than
+    fold 1. Pruning after fold 1 skips the two *most expensive* folds, and
+    pricing them at the mean of the folds that already ran understates the
+    saving — which is most of why the study missed its 30% gate."""
+    from pipeline.tune import _skipped_fold_seconds
+
+    class FakeStudy:
+        def get_trials(self, deepcopy=False, states=None):
+            return [
+                SimpleNamespace(user_attrs={"fold_seconds": [2.0, 6.0, 10.0]}),
+                SimpleNamespace(user_attrs={"fold_seconds": [2.0, 6.0, 10.0]}),
+            ]
+
+    # Pruned after fold 1: folds 2 and 3 are skipped and cost 6 + 10 = 16,
+    # not the 2 + 2 = 4 a running-mean estimate would have credited.
+    assert _skipped_fold_seconds(FakeStudy(), [2.0]) == pytest.approx(16.0)
+    assert _skipped_fold_seconds(FakeStudy(), [2.0, 6.0]) == pytest.approx(10.0)
+    assert _skipped_fold_seconds(FakeStudy(), [2.0, 6.0, 10.0]) == pytest.approx(0.0)
+
+
+def test_skipped_fold_pricing_falls_back_before_any_trial_completes():
+    """The first prunable trial may run before any trial has timed fold 3."""
+    from pipeline.tune import _skipped_fold_seconds
+
+    class EmptyStudy:
+        def get_trials(self, deepcopy=False, states=None):
+            return []
+
+    assert _skipped_fold_seconds(EmptyStudy(), [4.0]) == pytest.approx(8.0)
+    assert _skipped_fold_seconds(EmptyStudy(), []) == pytest.approx(0.0)
+
+
+def test_startup_trial_count_is_configurable_and_validated(monkeypatch, tmp_path):
+    """Optuna's default of 5 leaves a quarter of a 20-trial budget unprunable."""
+    import pipeline.tune as tune
+
+    captured = {}
+    real_pruner = optuna.pruners.MedianPruner
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real_pruner(**kwargs)
+
+    monkeypatch.setattr(optuna.pruners, "MedianPruner", spy)
+    monkeypatch.setattr(tune, "_trial_fold_primaries", lambda *args: [0.5] * 3)
+
+    tune.run_study({"model": "random"}, {}, budget=1,
+                   storage=f"sqlite:///{tmp_path / 'default.db'}", study_name="d")
+    assert captured["n_startup_trials"] == 3
+
+    tune.run_study({"model": "random", "hparams": {"pruner_startup_trials": 7}}, {},
+                   budget=1, storage=f"sqlite:///{tmp_path / 'custom.db'}", study_name="c")
+    assert captured["n_startup_trials"] == 7
+
+    with pytest.raises(ValueError, match="at least one"):
+        tune.run_study({"model": "random", "hparams": {"pruner_startup_trials": 0}}, {},
+                       budget=1, storage=f"sqlite:///{tmp_path / 'bad.db'}", study_name="b")
+
+
+def test_study_knobs_do_not_reach_the_model_as_hyperparameters(monkeypatch):
+    """LightGBM forwards unknown hparams straight into its own params, so a
+    study-level knob left in the config becomes a model argument."""
+    from pipeline import train, tune
+
+    seen = {}
+    monkeypatch.setattr(train, "_load_folds", lambda: [(None, None)] * 3)
+    monkeypatch.setattr(train, "_screen_config", lambda config: config)
+
+    class Recorder:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    study = optuna.create_study(pruner=optuna.pruners.NopPruner())
+    trial = study.ask()
+    config = {"model": "lgbm", "hparams": {"pruner_startup_trials": 3,
+                                           "trial_timeout_s": 5, "num_leaves": 7}}
+    try:
+        tune._trial_fold_primaries(config, 1, trial)
+    except Exception:
+        pass  # the worker is not the subject here; the stripped config is
+
+    assert "pruner_startup_trials" not in config["hparams"]
+    assert "trial_timeout_s" not in config["hparams"]
+    assert config["hparams"]["num_leaves"] == 7

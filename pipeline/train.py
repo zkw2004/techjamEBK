@@ -45,6 +45,15 @@ SCREEN_BUDGET_CAPS = {
 
 SCORE_CACHE_DIR = Path("logs/scores")
 
+# The cache exists so C7 can blend a parent's scores without refitting it, and
+# entries are keyed by (config, fidelity, seed, code fingerprint) — so every
+# experiment adds one and nothing ever replaces one. A real full-tier entry is
+# ~2.3MB (124,909 validation + 170,588 test scores), so an unattended 40-
+# iteration run writes ~90MB, and the confirm tier's five seeds per candidate
+# push that past 400MB. Evict least-recently-used entries past this budget:
+# a discarded entry only costs a refit, while a filled disk ends the run.
+SCORE_CACHE_MAX_BYTES = 512 * 1024 * 1024
+
 
 class LeakSuspectedError(RuntimeError):
     def __init__(self, primary: float):
@@ -133,7 +142,44 @@ def _write_score_cache(config: dict, fidelity: str, seed: int, result: dict,
             test_fingerprint="" if test_frame is None else _frame_fingerprint(test_frame),
         )
     os.replace(temporary, path)
+    _evict_score_cache()
     return path
+
+
+def _evict_score_cache(max_bytes: int | None = None) -> int:
+    """Drop least-recently-used cache entries past the size budget.
+
+    Eviction is by access time, so an entry a blend keeps reading survives
+    while one-off experiment scores age out. Losing an entry is never
+    incorrect — `_read_score_cache` returns None and the caller refits — so
+    this trades a possible refit for a bounded footprint. Best-effort: a file
+    another process removed first is not an error.
+    """
+    budget = SCORE_CACHE_MAX_BYTES if max_bytes is None else max_bytes
+    if not SCORE_CACHE_DIR.is_dir():
+        return 0
+    entries = []
+    total = 0
+    for path in SCORE_CACHE_DIR.glob("*.npz"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((stat.st_atime, stat.st_size, path))
+        total += stat.st_size
+    if total <= budget:
+        return 0
+    removed = 0
+    for _atime, size, path in sorted(entries):
+        if total <= budget:
+            break
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        total -= size
+        removed += 1
+    return removed
 
 
 def _read_score_cache(config: dict, fidelity: str, seed: int,
