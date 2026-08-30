@@ -9,8 +9,11 @@ no Docker (Section 12).
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
+import sys
 import time
 import traceback as traceback_module
+from collections.abc import Callable
 from numbers import Real
 from typing import Any
 
@@ -71,8 +74,15 @@ def _diff(action: Action) -> str:
     return f"{action.type}: model={action.config.model}, loss={action.config.loss}"
 
 
-def _node(action: Action, fidelity: str, result: dict) -> dict:
-    """Translate C1's public result contract into the Section 8.7 node shape."""
+def _node(action: Action, fidelity: str, result: dict, *, accepted: bool = False) -> dict:
+    """Translate C1's public result contract into the Section 8.7 node shape.
+
+    ``val_scores``/``val_user_ids`` live only on ``result`` (C1's contract,
+    Section 8.5) — the Section 8.7 node schema has no field for them, so they
+    never reach the persisted record. ``accepted`` must therefore be decided
+    by the caller, on ``result``, before this conversion drops them; it is
+    not computed here.
+    """
     config = action.config.model_dump() if action.config is not None else {}
     node: dict[str, Any] = {
         "parent": action.parent,
@@ -84,7 +94,7 @@ def _node(action: Action, fidelity: str, result: dict) -> dict:
         "config": config,
         "diff": _diff(action),
         "status": result.get("status", "error"),
-        "accepted": False,
+        "accepted": bool(accepted) if result.get("status") == "ok" else False,
         "manual_intervention": False,
         "seconds": result.get("seconds", 0.0),
         "gpu_seconds": result.get("gpu_seconds", 0.0),
@@ -119,7 +129,12 @@ def _node(action: Action, fidelity: str, result: dict) -> dict:
 
 
 def _process_context():
+    """Use a clean child after PyTorch/MPS has touched macOS Objective-C state."""
     methods = mp.get_all_start_methods()
+    if os.environ.get("TECHJAM_TEST_FORK_FIXTURES") == "1" and "fork" in methods:
+        return mp.get_context("fork")
+    if sys.platform == "darwin" and "spawn" in methods:
+        return mp.get_context("spawn")
     return mp.get_context("fork" if "fork" in methods else "spawn")
 
 
@@ -239,12 +254,25 @@ def _run_code_action(
             send_conn.close()
 
 
-def execute(action: Action, fidelity: str = "smoke", timeout_s: int = 1800) -> dict:
+def execute(
+    action: Action,
+    fidelity: str = "smoke",
+    timeout_s: int = 1800,
+    *,
+    accept_fn: Callable[[dict], bool] | None = None,
+) -> dict:
     """Build an Action into one completed node; never raise into the loop.
 
     C1 owns model execution and its own timeout.  A generated-code Action has
     an additional outer subprocess so untrusted feature/model source cannot
     crash or hang the orchestration parent.
+
+    ``accept_fn``, when given, is called on the raw C1 result (which still
+    carries ``val_scores``/``val_user_ids``) before it is converted to the
+    Section 8.7 node shape, since that conversion drops those fields. Its
+    return value becomes the persisted node's ``accepted`` field. Only called
+    on a successful result — the node schema forces ``accepted=False`` on any
+    error regardless.
     """
     started = time.monotonic()
     if isinstance(timeout_s, bool) or not isinstance(timeout_s, Real) or timeout_s <= 0:
@@ -286,7 +314,10 @@ def execute(action: Action, fidelity: str = "smoke", timeout_s: int = 1800) -> d
         # The node is the audited unit of work, so account for generated-code
         # setup and IPC as well as C1's model-training duration.
         result["seconds"] = time.monotonic() - started
-        return _node(action, fidelity, result)
+        accepted = False
+        if accept_fn is not None and result.get("status") == "ok":
+            accepted = accept_fn(result)
+        return _node(action, fidelity, result, accepted=accepted)
     except BaseException as exc:
         return _execution_error(
             action,

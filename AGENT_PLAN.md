@@ -92,7 +92,7 @@ Everything in this plan follows from these:
 ### 2.4 Success criteria
 
 - **Minimum viable:** loop runs 20+ unattended iterations, beats the official baseline on hidden test, produces complete run logs.
-- **Target:** 40+ iterations, clear score trajectory, at least one demonstrated failure-and-recovery, one novel methodological contribution.
+- **Target:** up to 50 iterations — the hard per-run cap (K23, 02_REQUIREMENTS.md) — clear score trajectory, at least one demonstrated failure-and-recovery, one novel methodological contribution. This document originally said "40+"; corrected 2026-08-31 to agree with the requirements doc rather than leave two authoritative-looking numbers in the repo.
 - **Stretch:** exposure-debiasing using KuaiRand's randomised-exposure slice.
 
 ---
@@ -243,7 +243,7 @@ This is the AIDE formulation (Jiang et al. 2025, cited in the challenge brief): 
 
 ### 6.2 Evaluation protocol: rolling internal folds
 
-**The problem this solves.** The official validation window (22 to 28 April) is your only clean signal, and the agent will evaluate against it 40+ times. Repeated evaluation against one set is overfitting, regardless of how the set was constructed. The hidden test will not forgive it.
+**The problem this solves.** The official validation window (22 to 28 April) is your only clean signal, and the agent will evaluate against it up to 50 times. Repeated evaluation against one set is overfitting, regardless of how the set was constructed. The hidden test will not forgive it.
 
 **The protocol.** Build three expanding-window folds *inside* the training period, always training earlier and validating later:
 

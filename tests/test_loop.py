@@ -64,7 +64,7 @@ def test_ten_candidates_run_unattended_and_cheap_tiers_filter_majority(isolated_
     def fake_propose(*_args):
         return next(actions), {"in": 1, "out": 1, "model": "fake"}
 
-    def fake_execute(action: Action, fidelity: str, timeout_s: int) -> dict:
+    def fake_execute(action: Action, fidelity: str, timeout_s: int, accept_fn=None) -> dict:
         del timeout_s
         candidate = action.config.hparams["candidate"]
         calls.append((candidate, fidelity))
@@ -97,7 +97,7 @@ def test_transient_failure_uses_a5_retry_without_human_input(isolated_loop, monk
     def fake_propose(*_args):
         return action, {"in": 1, "out": 1, "model": "fake"}
 
-    def fake_execute(current: Action, fidelity: str, timeout_s: int) -> dict:
+    def fake_execute(current: Action, fidelity: str, timeout_s: int, accept_fn=None) -> dict:
         nonlocal attempts
         del timeout_s
         if fidelity == "smoke" and attempts == 0:
@@ -162,3 +162,134 @@ def test_convergence_uses_only_full_evaluations():
 def test_run_rejects_invalid_iteration_counts(value, isolated_loop):
     with pytest.raises(ValueError, match="max_iterations"):
         loop.run(max_iterations=value, knowledge="fixture")
+
+
+@pytest.mark.parametrize("value", [0, -1, True])
+def test_run_rejects_invalid_max_hours(value, isolated_loop):
+    with pytest.raises(ValueError, match="max_hours"):
+        loop.run(max_iterations=1, max_hours=value, knowledge="fixture")
+
+
+def test_max_hours_stops_before_the_iteration_cap(isolated_loop, monkeypatch):
+    """K24: a wall-clock ceiling, checked before each new candidate — never
+    mid-candidate, so a running full evaluation is never killed partway."""
+
+    def fake_propose(*_args):
+        return _action(0), {"in": 1, "out": 1, "model": "fake"}
+
+    def fake_execute(action: Action, fidelity: str, timeout_s: int, accept_fn=None) -> dict:
+        del timeout_s
+        return _success(action, fidelity)
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.execute, "execute", fake_execute)
+
+    # First check (before iteration 1) is under budget; every check after is
+    # over it — so exactly one candidate completes before the deadline fires.
+    clock = iter([0.0, 0.0, 100.0, 100.0, 100.0, 100.0, 100.0])
+
+    written = loop.run(
+        max_iterations=50,
+        max_hours=1 / 3600,  # 1 second
+        knowledge="fixture",
+        sleep_fn=lambda _seconds: None,
+        time_fn=lambda: next(clock, 100.0),
+    )
+
+    assert loop.LAST_STOP_REASON == "time_cap"
+    assert len(written) > 0  # the in-flight candidate was allowed to finish
+
+
+def test_last_stop_reason_reports_the_iteration_cap(isolated_loop, monkeypatch):
+    def fake_propose(*_args):
+        return _action(0), {"in": 1, "out": 1, "model": "fake"}
+
+    def fake_execute(action: Action, fidelity: str, timeout_s: int, accept_fn=None) -> dict:
+        del timeout_s
+        return _success(action, fidelity)
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.execute, "execute", fake_execute)
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _seconds: None)
+
+    assert loop.LAST_STOP_REASON == "iteration_cap"
+
+
+def _full_result(primary: float) -> dict:
+    """A raw C1-shaped result: has val_scores/val_user_ids, unlike _success()."""
+    return {
+        "status": "ok", "gauc": primary, "ndcg": primary, "primary": primary,
+        "fold_primaries": [primary, primary, primary], "segments": {},
+        "val_scores": [primary, primary], "val_user_ids": [0, 1],
+        "seconds": 0.01, "gpu_seconds": 0.0,
+    }
+
+
+def _accept_aware_execute(primaries_by_call):
+    """A fake execute() that genuinely applies accept_fn, like agent/execute.py
+    does — needed to exercise run()'s _accept_full wiring, since _success()
+    bypasses execute() entirely and always leaves accepted=False."""
+    calls = iter(primaries_by_call)
+
+    def fake_execute(action: Action, fidelity: str, timeout_s: int, accept_fn=None) -> dict:
+        del timeout_s
+        if fidelity != "full":
+            return _success(action, fidelity)
+        raw = _full_result(next(calls))
+        accepted = accept_fn(raw) if accept_fn is not None else False
+        return executor._node(action, fidelity, raw, accepted=accepted)
+
+    return fake_execute
+
+
+def test_first_full_success_is_accepted_unconditionally(isolated_loop, monkeypatch):
+    """Nothing to compare against yet — the first full result establishes the
+    reference, matching _screen_survives' identical convention one tier down."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.55]))
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None)
+
+    full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
+    assert len(full_nodes) == 1
+    assert full_nodes[0]["accepted"] is True
+
+
+def test_second_full_candidate_is_gated_against_the_first(isolated_loop, monkeypatch):
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    # First candidate: 0.55, auto-accepted. Second: 0.90 — a real gate.accept
+    # call would need real per-row alignment against the official validation
+    # set, so it's mocked here; run()'s wiring is what's under test, not
+    # gate.accept's own bootstrap correctness (covered in test_gate.py).
+    monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (True, (0.01, 0.05)))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.55, 0.90]))
+
+    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None)
+
+    full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
+    assert [n["accepted"] for n in full_nodes] == [True, True]
+    assert [n["metrics"]["primary"] for n in full_nodes] == [0.55, 0.90]
+
+
+def test_rejected_full_candidate_is_never_selected_as_the_next_parent(isolated_loop, monkeypatch):
+    parents_seen = []
+
+    def fake_propose(history, _knowledge, parent):
+        parents_seen.append(parent["id"])
+        return _action(len(parents_seen)), {"in": 1, "out": 1, "model": "fake"}
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (False, (-0.02, 0.01)))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.55, 0.30]))
+
+    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None)
+
+    full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
+    assert [n["accepted"] for n in full_nodes] == [True, False]
+    # the rejected node (n002-equivalent) must never become a parent
+    assert parents_seen[-1] != full_nodes[1]["id"]

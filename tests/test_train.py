@@ -271,6 +271,13 @@ def test_full_refit_uses_median_best_epoch_selected_on_internal_folds(monkeypatc
 
 
 def test_full_refit_uses_fold_selected_lightgbm_boosting_rounds(monkeypatch):
+    # _process_context() forces spawn for model="lgbm" to protect a *real*
+    # LightGBM run from the macOS OMP abort — it has no way to know
+    # _get_model_class was monkeypatched below to a numpy-only fixture that
+    # never touches the real backend. This test needs the config to literally
+    # say "lgbm" to exercise _run_full's num_boost_round branch, so it opts
+    # into fork explicitly rather than triggering the real-backend guard.
+    monkeypatch.setenv("TECHJAM_TEST_FORCE_FORK", "1")
     train = _install_fixture_backend(monkeypatch, FoldBoostingRoundModel)
 
     result = train.run_experiment(
@@ -411,3 +418,25 @@ def test_confirm_averages_five_consecutive_seeds(monkeypatch):
     np.testing.assert_array_equal(result["val_scores"], np.full(6, 12.0))
     np.testing.assert_array_equal(result["test_scores"], np.full(5, 12.0))
     assert len(result["fold_primaries"]) == 3
+
+
+def test_not_implemented_error_classifies_as_schema_not_transient():
+    """model="deepfm_mtl" raises NotImplementedError (pipeline/models/deepfm.py).
+
+    It used to fall through _classify_exception's catch-all and come back as
+    "transient", which sends A5 into three rounds of backoff-and-retry on the
+    exact same config - guaranteed to fail every time, since retrying does not
+    change what model was asked for. "schema" instead gets one repair attempt
+    with a *different* config, which can actually succeed.
+    """
+    from pipeline.train import _classify_exception
+
+    exc = NotImplementedError("multi-task DeepFM is deprioritized; use model='deepfm'")
+    assert _classify_exception(exc) == "schema"
+
+
+def test_classify_exception_still_falls_back_to_transient():
+    """A genuine unrecognised failure (e.g. a network error) is not schema."""
+    from pipeline.train import _classify_exception
+
+    assert _classify_exception(ConnectionError("connection reset")) == "transient"

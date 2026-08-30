@@ -16,7 +16,7 @@ from copy import deepcopy
 from statistics import median
 from typing import Any
 
-from agent import execute, manifest, propose, recovery, store
+from agent import execute, gate, manifest, propose, recovery, store
 from agent.schema import FAMILIES, Action
 
 EPSILON = 0.002
@@ -39,16 +39,20 @@ ROOT_PARENT = {
 def _branchable(history: list[dict]) -> list[dict]:
     """Nodes a proposal can legitimately branch from.
 
-    Restricted to completed full/confirm evaluations with a finite primary —
-    the same filter A6's placeholder used. A smoke or screen pilot never
-    became the branch point: it was screened cheaply precisely so it would
-    not consume attention (or official validation) as if it were evidence.
+    Restricted to completed full/confirm evaluations with a finite primary,
+    that also cleared the bootstrap accept gate (Section 6.6, wired in run()'s
+    accept_fn). A smoke or screen pilot never became the branch point: it was
+    screened cheaply precisely so it would not consume attention (or official
+    validation) as if it were evidence. A full-tier result that lost to the
+    reference on a 95% CI is the same case one tier up: real evidence against
+    the mechanism, not a candidate to build the next hypothesis on.
     """
     return [
         node
         for node in history
         if node.get("status") == "ok"
         and node.get("fidelity") in {"full", "confirm"}
+        and node.get("accepted") is True
         and isinstance(node.get("metrics", {}).get("primary"), (int, float))
     ]
 
@@ -132,7 +136,13 @@ def converged(history: list[dict]) -> bool:
 
 
 def _persist(node: dict, *, tokens: dict | None = None, repair_attempted: bool = False) -> dict:
-    """Write one completed attempt and return its normalised ledger record."""
+    """Write one completed attempt and return its normalised ledger record.
+
+    ``accepted`` is not decided here — it is baked into ``node`` already, by
+    C1's ``execute()`` applying ``accept_fn`` to the raw result before this
+    function ever sees it (the Section 8.7 node shape has dropped the score
+    arrays accept/reject needs by this point).
+    """
     record = deepcopy(node)
     record["manual_intervention"] = False
     if tokens is not None:
@@ -184,8 +194,18 @@ def _execute_with_recovery(
     tokens: dict | None,
     timeout_s: int,
     sleep_fn: Callable[[float], None],
+    accept_fn: Callable[[dict], bool] | None = None,
 ) -> tuple[dict, Action, list[dict]]:
-    """Execute one tier and all recovery attempts allowed by A5."""
+    """Execute one tier and all recovery attempts allowed by A5.
+
+    ``accept_fn``, when given, is forwarded to C1's ``execute()`` only while
+    the attempt is still running at the originally requested fidelity — never
+    on a fallback from a fidelity-reducing retry, which won't carry
+    full-validation score alignment. C1 applies it to the raw result (which
+    still has the score arrays the Section 8.7 node shape drops) before
+    persisting, so accept/reject is decided once, at write time, matching the
+    ledger's append-only contract.
+    """
     current_action = action
     current_fidelity = fidelity
     current_tokens = tokens
@@ -194,8 +214,14 @@ def _execute_with_recovery(
     records: list[dict] = []
 
     while True:
+        active_accept_fn = accept_fn if current_fidelity == fidelity else None
         record = _persist(
-            execute.execute(current_action, fidelity=current_fidelity, timeout_s=timeout_s),
+            execute.execute(
+                current_action,
+                fidelity=current_fidelity,
+                timeout_s=timeout_s,
+                accept_fn=active_accept_fn,
+            ),
             tokens=current_tokens,
             repair_attempted=repair_attempted,
         )
@@ -270,12 +296,19 @@ def _proposal_failure(error: propose.ProposeError) -> None:
     )
 
 
+# Set at the end of every run() call; read by callers (cli.py) that want to
+# report *why* a run stopped without re-deriving it from the node history.
+LAST_STOP_REASON: str | None = None
+
+
 def run(
-    max_iterations: int = 40,
+    max_iterations: int = 50,  # K23 (02_REQUIREMENTS.md): hard per-run cap
     *,
     timeout_s: int = 1800,
+    max_hours: float | None = None,  # K24 (02_REQUIREMENTS.md): wall-clock ceiling
     knowledge: str | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
+    time_fn: Callable[[], float] = time.monotonic,
 ) -> list[dict]:
     """Run autonomous candidates through smoke → screen → full.
 
@@ -283,7 +316,14 @@ def run(
     pilot nodes; a candidate can produce several persisted records.  The
     function returns the records written during this invocation for callers
     that want a live view, while durable state remains the append-only store.
+
+    Stops on whichever comes first: convergence (Section 4.5), the iteration
+    cap, or ``max_hours`` of wall-clock time — checked before each new
+    candidate starts, never mid-candidate, so a long-running full evaluation
+    is never killed partway through. ``LAST_STOP_REASON`` records which one
+    fired: ``"converged"``, ``"iteration_cap"``, or ``"time_cap"``.
     """
+    global LAST_STOP_REASON
     bad_iterations = (
         isinstance(max_iterations, bool)
         or not isinstance(max_iterations, int)
@@ -294,14 +334,45 @@ def run(
     bad_timeout = isinstance(timeout_s, bool) or not isinstance(timeout_s, int) or timeout_s < 1
     if bad_timeout:
         raise ValueError("timeout_s must be a positive integer")
+    if max_hours is not None and (isinstance(max_hours, bool) or max_hours <= 0):
+        raise ValueError("max_hours must be a positive number when given")
 
     manifest.preflight()
     knowledge = propose.load_knowledge() if knowledge is None else knowledge
     written: list[dict] = []
+    deadline = time_fn() + max_hours * 3600 if max_hours is not None else None
 
+    # In-memory reference for the accept gate (Section 6.6, D3). Node records
+    # don't persist `seed`, so a past node's raw per-row scores cannot be
+    # reliably re-derived across a resumed run() call; scoped to this
+    # invocation. The first full-tier success has nothing to compare against
+    # and establishes the reference — the same "first viable candidate"
+    # convention _screen_survives already uses one tier down.
+    best_full: dict[str, Any] | None = None
+
+    def _accept_full(raw: dict) -> bool:
+        nonlocal best_full
+        primary = raw.get("primary")
+        val_scores = raw.get("val_scores")
+        val_user_ids = raw.get("val_user_ids")
+        if val_scores is None or val_user_ids is None or primary is None:
+            return False  # nothing to gate on; never silently accept
+        if best_full is None:
+            best_full = {"scores": val_scores, "user_ids": val_user_ids, "primary": primary}
+            return True
+        accepted, _ci = gate.accept(val_scores, best_full["scores"], val_user_ids)
+        if accepted:
+            best_full = {"scores": val_scores, "user_ids": val_user_ids, "primary": primary}
+        return accepted
+
+    LAST_STOP_REASON = "iteration_cap"
     for _ in range(max_iterations):
         history = store.list_nodes()
         if converged(history):
+            LAST_STOP_REASON = "converged"
+            break
+        if deadline is not None and time_fn() >= deadline:
+            LAST_STOP_REASON = "time_cap"
             break
         parent = select_parent(history)
         try:
@@ -338,6 +409,7 @@ def run(
             tokens=None,
             timeout_s=timeout_s,
             sleep_fn=sleep_fn,
+            accept_fn=_accept_full,
         )
         written.extend(records)
         store.append_event(
@@ -347,6 +419,7 @@ def run(
                 "to": "full",
                 "node": full["id"],
                 "status": full["status"],
+                "accepted": full.get("accepted", False),
                 "manual_intervention": False,
             }
         )
@@ -354,9 +427,9 @@ def run(
     return written
 
 
-def main(max_iterations: int = 40) -> None:
+def main(max_iterations: int = 50, max_hours: float | None = None) -> None:
     """CLI entry point; detailed records remain in ``logs/nodes``."""
-    run(max_iterations=max_iterations)
+    run(max_iterations=max_iterations, max_hours=max_hours)
 
 
 if __name__ == "__main__":

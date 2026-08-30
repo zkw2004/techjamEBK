@@ -41,3 +41,5 @@ kuairand-starter-kit/*.tar.gz
 # Locally generated validation fixtures must never enter it — they carry a
 # placeholder manifest hash and an accepted flag no gate granted. Write those
 # to a temporary store instead (see tools/make_blend_parents.py).
+logs/nodes/*.json
+logs/run.jsonl

@@ -15,9 +15,15 @@ truth — the contracts in Section 8 are frozen.
 
 ## Status
 
-Scaffolded; Day-0 verification complete and reproducing — see [DAY0.md](DAY0.md).
-Next on the critical path: **B1** ([pipeline/data.py](pipeline/data.py)), then
-C1, then the C2 gate.
+The complete research loop is implemented: immutable data/scoring contracts,
+leakage-checked features, four model families, internal-fold screening,
+bootstrap promotion, append-only experiment records, and final submission
+generation. Day-0 contract checks and baseline reproduction are recorded in
+[DAY0.md](DAY0.md).
+
+The active deliverable is an evidence-backed run, not a claim that every model
+is universally best. Run the probes, inspect the ledger, then finalise the
+accepted validation-best configuration.
 
 ### Corrections to AGENT_PLAN.md, read out of the shipped code
 
@@ -71,7 +77,7 @@ must stay byte-identical — see
 [pipeline/README_STARTER_KIT.md](pipeline/README_STARTER_KIT.md).
 
 ```bash
-pytest                           # green; unbuilt tasks show as skips
+pytest                           # test suite
 ruff check .
 ```
 
@@ -119,9 +125,65 @@ the contract we build against:
 Still worth confirming at the webinar that the prose (NDCG@10 / Recall@50) is
 stale rather than a second scored profile.
 
-## Reproduction, limitations, contributions
+## Reproduction
 
-TODO — task D9.
+From a clean clone, install the development dependencies and organiser data:
+
+```bash
+make setup
+make data
+make check
+```
+
+Run the five model-direction probes on internal temporal folds (the default
+does not spend the official validation window):
+
+```bash
+python -m tools.probes --fidelity screen --fm-trials 30
+```
+
+The unattended agent uses the Anthropic key in your ignored `.env` and writes
+an append-only record for every proposal, pilot, failure, and recovery:
+
+```bash
+python -m agent.loop
+python -m tools.report
+```
+
+After the statistical gate accepts a full-fidelity winner, create the final
+test submission. This refits the chosen configuration on the permitted
+`train + validation` period, averages exactly five seeds, preserves the
+loader's test order, and calls the untouched organiser checker:
+
+```bash
+python -m tools.finalise --node n017 --output submission.csv
+```
+
+Replace `n017` with the accepted full/confirm node ID. The output has exactly
+`row_id,user_id,video_id,score`; `row_id` is the positional index from
+`pipeline.data.load()`, never a join on user/video pairs.
+
+## Limitations
+
+- The organiser brief conflicts with its shipped evaluator. This project uses
+  the hashed evaluator contract: GAUC and nDCG@5, not prose-only alternatives.
+- The randomised-exposure log starts after the training cutoff, so it is used
+  only as a diagnostic/validation slice—not for training-time debiasing.
+- `video_features_statistic_pure.csv` remains excluded because its aggregation
+  cutoff is not proven to be before the test window.
+- Validation is a budgeted selection resource. Internal expanding folds, not
+  the official validation labels, tune feature parameters and blend weights.
+- Results are data- and compute-budget-specific; model probes decide the
+  search order rather than assuming neural models outperform classical ones.
+
+## Contributions
+
+| Member | Contribution |
+|---|---|
+| Kaiwen | Agent schemas, node ledger, structured proposal/repair calls, isolated execution, recovery, fidelity loop, and search control. |
+| Malvika | Fixed temporal data splits, internal folds, feature registry, historical aggregates, smoothing, leakage defence, negative sampling, and exposure diagnostics. |
+| Ethan | Experiment runner, reference baselines, FM/LightGBM/DeepFM models, tuning, score caching, and blending. |
+| Pinxin | Evaluation integrity, metric manifest, promotion/segment gates, probes, reporting, finalisation workflow, README, and research priors. |
 
 ## References
 

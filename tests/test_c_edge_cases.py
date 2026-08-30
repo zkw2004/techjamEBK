@@ -18,6 +18,8 @@ error, and nothing downstream can tell a fabricated 0.25 from a measured one.
 
 from __future__ import annotations
 
+import sys
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -121,7 +123,25 @@ def test_a_tiny_timeout_is_enforced_rather_than_hanging(runner):
 
 # --- permanent failures must not be classified `transient` ------------------
 
-MODELS = ["random", "popularity", "fm", "lgbm", "deepfm"]
+MODELS = [
+    "random",
+    "popularity",
+    "fm",
+    pytest.param(
+        "lgbm",
+        marks=pytest.mark.skipif(
+            sys.platform == "darwin",
+            reason="local LightGBM wheel requires Homebrew libomp; covered in Linux CI",
+        ),
+    ),
+    pytest.param(
+        "deepfm",
+        marks=pytest.mark.skipif(
+            sys.platform == "darwin",
+            reason="fixture-backed native model tests use Linux CI; macOS production uses spawn",
+        ),
+    ),
+]
 HPARAMS = {
     "random": {},
     "popularity": {},
