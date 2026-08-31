@@ -71,13 +71,44 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 - **Empirical-Bayes smoothing** — Shrink sparse group rates toward the global
   rate with `(clicks + alpha * global_rate) / (impressions + alpha)`, fitting
   `alpha` on internal folds only.
-- **Exposure debiasing (randomised slice)** — Use the randomised-exposure log
-  for unbiased diagnostics or IPS only when its propensity and temporal
-  assumptions are satisfied; post-training-cutoff rows never enter fitting.
-- **Blending** — Rank-average continuous predictions from **exactly two**
-  distinct parents, each of which must be an accepted, successful, full-tier
-  node; skip near-identical models and reject a blend unless it beats both
-  parents on internal folds and official validation.
+- ~~**Exposure debiasing (randomised slice)**~~ — **Impossible on this data.**
+  `is_rand` is 0 for all 1,141,112 training rows, so there is no unbiased slice
+  and no estimable propensity. Do not propose IPS or exposure reweighting.
+- **Blending** — Combine continuous predictions from **exactly two** distinct
+  parents, each an accepted, successful, full-tier node; reject a blend unless
+  it beats both parents. Two measured points on *which* blend is worth trying:
+  parents must genuinely disagree, and the method matters. FM × DeepFM+SENet
+  failed (per-user Spearman **+0.7975** — DeepFM contains FM over the same
+  fields, so "different family" was a label, not a mechanism). FM × LightGBM,
+  a factorisation against trees, correlated less (**+0.7637**) and worked:
+  `logit_avg` gave **+0.001965 over FM with a 95% CI excluding zero**, while
+  the default `rank_avg` found nothing on the same pair. **Report the parent
+  correlation before blending, and do not assume `rank_avg` is the right
+  method** — it was the only one of three that missed the real effect here.
+
+## Measured results specific to this project — do not re-derive these
+
+Each cost real compute; repeating one wastes an iteration.
+
+- **Single features do not beat the five official fields.** All 20 registered
+  features were tested one at a time on top of `FIELDS` at full tier with the
+  D12 rule (`scripts/feature_sweep.py`). Every one landed inside noise except
+  `hour_of_day` (+0.001686) and `day_of_week` (+0.001635), whose CIs exclude
+  zero but which sit under the 0.002 floor. **Adding them together gives
+  +0.001644 — no better than either alone**, so they are redundant rather than
+  complementary. Feature *combinations* beyond that pair remain untested.
+- **`sim_to_history` carries no usable signal** (delta −0.000561, CI
+  [−0.001456, +0.001082]). That closes the user-history × candidate direction,
+  and DIN with it. Do not propose sequence models over user history.
+- **The per-user aggregates are `metric_inert`.** `user_ctr`, `user_activity`,
+  `pcr_hist` and the `user_*_rate_decayed` family are `groupby("user_id")`
+  values, identical across every candidate a user sees, so they cannot move a
+  within-user metric except through a cross. `tools/screen.py` measures this;
+  the sweep confirms it end to end.
+- **Nothing has ever been tuned.** There are zero `tune` nodes in the ledger
+  and no Optuna study on disk, for any model. Every result in this project is
+  on hand-picked defaults. `type="tune"` is wired and works — proposing a tuning
+  action is among the few genuinely unexplored moves available.
 
 ## Cautions from the literature
 

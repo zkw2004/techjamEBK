@@ -1090,6 +1090,80 @@ Faster and far more convincing than hoping something breaks. Keep a recorded rep
 
 ---
 
+## 14A. Experimental record — 2026-08-31
+
+Every figure below is full tier, seed 0, on the corrected FM encoder (#54) and
+the corrected DeepFM epoch budget (#55), judged by D12's combined rule: point
+delta ≥ 0.002 **and** a bootstrap 95% CI over users excluding zero. Measured FM
+baseline on the day: **0.600612** (published 0.6016; the gap is inside the
+0.0008 seed std). Reproduce with `scripts/feature_sweep.py` and
+`scripts/b14_decision_gate.py`.
+
+**Two measurement bugs were found and fixed before any of this was trusted**,
+and both invalidated earlier results rather than merely improving them — see
+traps 11 and 14. That is the day's main finding: *the instruments were wrong,
+and the errors were only visible because a suspicious result was chased instead
+of accepted.*
+
+### Feature sweep — 20 features, first fair test
+
+| result | count | detail |
+|---|---|---|
+| CI excludes zero, under floor | 2 | `hour_of_day` +0.001686 [+0.000218, +0.003131]; `day_of_week` +0.001635 [+0.000039, +0.003088] |
+| noise (CI straddles zero) | 17 | every remaining registered feature, −0.001 to +0.001 |
+| leak canary fired | 1 | `user_ctr_decayed` — see below |
+
+`hour_of_day + day_of_week` **together** give +0.001644, no better than either
+alone: they are redundant, not additive. No single feature, and no pair tested,
+clears the floor. This is the registry's first valid test — before #54 every
+continuous feature was memorised value-by-value by FM.
+
+### Blending — the method and the parents both matter
+
+| pair | Spearman | best method | delta vs better parent |
+|---|---|---|---|
+| FM × DeepFM+SENet | +0.7975 | `logit_avg` | +0.000024 (noise); `rank_avg` **−0.001343**, CI below zero |
+| FM × LightGBM | **+0.7637** | **`logit_avg`** | **+0.001965, CI [+0.000750, +0.003177]** |
+
+The first pair failed because the parents agree: DeepFM contains FM over the
+same five fields, so "different model family" was a label rather than a
+mechanism. Trees are a different hypothesis class and disagree more. **The
+default `rank_avg` found nothing on the pair where `logit_avg` found a real
+effect** — testing only the default would have concluded blending was dead.
+
+FM × LightGBM `logit_avg` reaches 0.602577: **+0.001965 over the measured FM
+parent with a CI excluding zero, but only +0.000977 over the published 0.6016
+baseline**, which is the bar `_accept_full` gates on. Real, and not promotable.
+Closest the project has come.
+
+### Model-level results
+
+- **C12 SENet: +0.0198** on a converged DeepFM — the largest single mechanism
+  effect measured. Was +0.0053 on the starved model; the epoch fix quadrupled
+  it, because a gating mechanism has little to modulate in a 2-epoch network.
+- **C11 LHUC: +0.0015**, under the floor, and adds ~0.0005 on top of SENet.
+- **DeepFM converged: 0.575711**, +0.0336 from the epoch fix alone. With SENet
+  0.595490 — still 0.006 under FM, so not a candidate on its own.
+
+### Integrity: `user_ctr_decayed` leaks
+
+Two independent guards flagged it: `pipeline/train`'s leak canary fired
+(`error_class="leak_suspected"`, primary > 0.75 against a 0.8484 *oracle*
+ceiling), and `_matrix`'s `leakage_check` raised `FeatureLeakError` on the
+cross-frame path. A registered, callable feature that leaks the label.
+Untested in the sweep as a result; needs a B6 fix or removal.
+
+### What has never been tried
+
+**Nothing in this project has ever been tuned.** Zero `tune` nodes in the
+ledger, no Optuna study on disk, for any model. LightGBM in particular has 10
+runs ever, all `lambdarank`, only two at full tier, on stock hyperparameters —
+and it is now a proven blend partner, so gains there lift the blend directly.
+Feature combinations beyond the time pair, and features against LightGBM rather
+than FM, are also untested.
+
+---
+
 ## 15. Open questions
 
 | Question | Owner | Resolve by |
