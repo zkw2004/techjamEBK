@@ -24,6 +24,11 @@ def isolated_loop(tmp_path, monkeypatch):
         return {"metric_profile": {}}
 
     monkeypatch.setattr(loop.manifest, "preflight", fake_preflight)
+    monkeypatch.setattr(
+        loop.leak_preflight,
+        "ensure_preflight",
+        lambda: {"status": "passed"},
+    )
     yield preflights
     store.set_manifest_provider(None)
 

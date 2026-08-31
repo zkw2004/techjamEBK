@@ -1,4 +1,4 @@
-.PHONY: setup data test lint check selfcheck baseline probes run report finalize help
+.PHONY: setup data test lint check selfcheck preflight baseline probes run report finalize help
 
 # Every target below shells out to `cli.py`, which is the supported entry
 # point: it loads `.env`, archives a prior ledger under `--fresh`, and actually
@@ -27,6 +27,9 @@ check: lint test  ## What CI runs
 
 selfcheck:  ## Preflight: contracts, hashes, and data integrity
 	python3 cli.py selfcheck
+
+preflight:  ## Run D13 label-permutation and injected-leak canaries
+	python3 cli.py --preflight
 
 baseline:  ## Reproduce the official FM baseline (validation primary ~0.6016)
 	python3 cli.py baseline

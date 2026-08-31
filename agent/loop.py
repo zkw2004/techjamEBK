@@ -18,6 +18,7 @@ from typing import Any
 
 from agent import ablate, execute, gate, manifest, propose, recovery, schedule, store
 from agent.schema import FAMILIES, Action
+from tools import leak_preflight
 
 EPSILON = 0.002
 NO_IMPROVEMENT_ITERATIONS = 3
@@ -410,6 +411,7 @@ def run(
     seed_baseline: bool = True,
     ablate_enabled: bool = True,
     scheduler_enabled: bool = True,
+    leak_preflight_enabled: bool = True,
 ) -> list[dict]:
     """Run autonomous candidates through smoke → screen → full.
 
@@ -453,6 +455,8 @@ def run(
         raise ValueError("max_hours must be a positive number when given")
 
     manifest.preflight()
+    if leak_preflight_enabled:
+        leak_preflight.ensure_preflight()
     knowledge = propose.load_knowledge() if knowledge is None else knowledge
     written: list[dict] = []
     deadline = time_fn() + max_hours * 3600 if max_hours is not None else None
