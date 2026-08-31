@@ -34,8 +34,12 @@ def test_permutation_preserves_each_users_label_multiset():
 
 def test_clean_pipeline_passes_and_injected_leak_trips_alarm():
     train, validation = _frames()
+    observed = {}
 
-    def fit_predict(_config, _train, _validation, prediction_frames, _seed):
+    def fit_predict(config, permuted_train, permuted_validation, prediction_frames, _seed):
+        observed["model"] = config["model"]
+        observed["train"] = permuted_train
+        observed["validation"] = permuted_validation
         return [np.linspace(0.1, 0.9, len(frame)) for frame in prediction_frames]
 
     def evaluate(_frame, _scores):
@@ -54,6 +58,10 @@ def test_clean_pipeline_passes_and_injected_leak_trips_alarm():
     assert result["status"] == "passed"
     assert result["clean_passed"] is True
     assert result["leaky_fixture_rejected"] is True
+    assert observed["model"] == "popularity"
+    assert observed["train"] is not train
+    assert observed["validation"] is not validation
+    assert "train and validation" in result["clean_null"]
 
 
 def test_preflight_fails_when_clean_pipeline_is_predictive():
