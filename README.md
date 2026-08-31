@@ -259,6 +259,38 @@ python -m tools.oom_demo
 - Results are data- and compute-budget-specific; model probes decide the
   search order rather than assuming neural models outperform classical ones.
 
+### What we would improve given more time
+
+1. **Spend the remaining iteration budget.** The run converged after **12 of
+   the 50** permitted iterations, on only four full-tier evaluations. The
+   stopping rule is the organiser's own (ε = 0.002, N = 3) and we deliberately
+   did not relax it, but it fired at the earliest point it mathematically
+   could, and the closest candidate missed by **0.9× one seed-std**. Re-running
+   under the identical rule is the single highest-value thing left.
+2. **Fix the proposer's malformed tuning actions.** Four iterations were lost
+   to `type="tune"` proposals with an empty `search_space` — ~61k input tokens
+   for zero usable nodes. The schema rejects them correctly; the prompt should
+   stop generating them.
+3. **Reject semantic duplicates before execution.** The schema already blocks
+   the specific case that once cost 11 iterations (FM variants whose `loss` was
+   silently ignored), but nothing stops a re-proposal of a config already
+   measured as noise.
+4. **Search feature *combinations*, and per model.** Our sweep tested 20
+   features one at a time against FM. That is the right shape for a
+   factorisation and the wrong one for trees, which select internally — and
+   indeed a video-side feature block that was pure noise for FM was worth
+   **+0.0028** to LightGBM. Combinations beyond one tested pair remain
+   unexplored.
+5. **Re-specify the metric-inert features.** Eight registered features are
+   `groupby("user_id")` aggregates, constant across a user's own candidate
+   list, and therefore invisible to a within-user metric regardless of model.
+   They need a per-candidate grain, not a different formula.
+6. **Weight blend parents on diversity, not just accuracy.** Tuning LightGBM
+   improved it in isolation (+0.00065) but *hurt* the FM×LightGBM blend
+   (−0.00109), because it pushed the two models' rankings closer together
+   (Spearman 0.7637 → 0.7878). Optimising ensemble members individually is not
+   the same as optimising the ensemble.
+
 ## Contributions
 
 | Member | Contribution |
