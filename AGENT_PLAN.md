@@ -93,7 +93,7 @@ Everything in this plan follows from these:
 
 - **Minimum viable:** loop runs 20+ unattended iterations, beats the official baseline on hidden test, produces complete run logs.
 - **Target:** up to 50 iterations — the hard per-run cap (K23, 02_REQUIREMENTS.md) — clear score trajectory, at least one demonstrated failure-and-recovery, one novel methodological contribution. This document originally said "40+"; corrected 2026-08-31 to agree with the requirements doc rather than leave two authoritative-looking numbers in the repo.
-- **Stretch:** exposure-debiasing using KuaiRand's randomised-exposure slice.
+- ~~**Stretch:** exposure-debiasing using KuaiRand's randomised-exposure slice.~~ **Closed 2026-08-31 (§9.2, B8):** `is_rand` is 0 across all 1,141,112 training rows — no unbiased slice exists in the training window. Replaced as the highest-upside item by B14/§9.2.
 
 ---
 
@@ -217,6 +217,23 @@ Pinned convention: users with zero positives count as nDCG = 0 and **are** inclu
 2. **Ties are actively harmful.** Tied items get an arbitrary order. This is why ensembling by voting is disqualified (Section 6.9) and why you must never threshold.
 3. **The user is the unit of independence.** This is why the bootstrap resamples users rather than rows (6.6), why internal folds must not split a user's history mid-stream, and why LightGBM needs a correct per-user `group` array for lambdarank.
 
+### 5.4 The candidate lists are tiny — measured, not assumed
+
+Measured on the official validation split (`RECSYS_COURSE_ANALYSIS.md` §2.1):
+
+| Quantity | Value |
+|---|---|
+| Candidates per user, median | **4** (p90 = 12) |
+| Users usable by GAUC (`0 < positives < impressions`) | 57.8% |
+| Users excluded: all-negative | 30.3% |
+| Users excluded: all-positive | 11.9% |
+
+Read every result in this project through these numbers.
+
+1. **A +0.002 delta is a large effect here, not a small one.** With a median of 4 items to order and 42% of users contributing nothing to GAUC, single-seed swings of ±0.001 are structurally expected. This is the frame for judging every experiment; it is also why `MIN_DELTA_FLOOR` at 0.002 is the right bar and not a timid one.
+2. **The only thing that can move the score is within-user discrimination between ~4 items.** A feature that is constant across one user's candidates contributes exactly zero except through interactions — this is what B12 measures, and why B12 is a gate rather than a report.
+3. **Report these numbers to judges.** Without them a +0.002 improvement looks trivial. With them it is legible.
+
 ---
 
 # PART III — STRATEGY
@@ -314,7 +331,7 @@ The dominant risk is not a slightly suboptimal technique. It is an action space 
 Two under-explored ideas with high Innovation value, both belonging in `agent/knowledge.md`:
 
 - **Negative sampling strategy.** Which non-clicks to train against (all impressions, in-session, popularity-weighted) materially affects recsys performance and few teams will touch it.
-- **Exposure debiasing via the randomised-exposure slice.** KuaiRand's reason for existing as a research dataset. Logged clicks are contaminated by whatever policy chose the impressions; the randomised slice is unbiased. Using it to correct the rest is genuinely publishable. **Constraint:** only records dated before the training cutoff may be used. Randomised-exposure rows from later dates are diagnostic only.
+- ~~**Exposure debiasing via the randomised-exposure slice.**~~ **Closed 2026-08-31 (B8).** `is_rand` is 0 across all 1,141,112 training rows — the unbiased slice this idea depends on does not exist in the training window. Kept here only as a documented negative result; do not reattempt without new evidence the slice is present.
 
 ### 6.6 Promotion gates
 
@@ -822,13 +839,15 @@ class BaseModel(Protocol):
 | B5 | Time-decay + empirical-Bayes smoothing helpers | B4, B2 | Exponential decay with configurable half-life; `r = (c + α·g)/(n + α)`; α and half-life fitted on internal folds only; sparse-group test (n=2) returns near-global rate |
 | B6 | Leakage guard | B3 | `test_leakage.py`: a feature reading `target_df["click"]` rejected; a `FORBIDDEN_SAME_ROW` column of `target_df` rejected; `EXCLUDED_SOURCES` rejected; legitimate historical aggregates pass |
 | B7 | Negative sampling strategies | B1 | Three strategies (all, in_session, pop_weighted) selectable via config |
-| B8 | **Stretch:** randomised-exposure slice loader + IPS reweighting | B1, B6 | Slice separable; only pre-cutoff rows exposed; reweighting function documented with its assumptions |
+| B8 | ~~**Stretch:** randomised-exposure slice loader + IPS reweighting~~ **WONTFIX — impossible on this data.** | B1, B6 | **Closed by measurement, not by descoping.** `is_rand` is **0 for all 1,141,112 training rows** — the randomised-exposure slice KuaiRand documents is absent from the Pure variant's training window. There is no unbiased slice from which to estimate an exposure propensity, so IPS reweighting has no estimable weights. Independently confirmed twice: once by this workstream's own investigation, once by the data verification in `RECSYS_COURSE_ANALYSIS.md` §2.5. **This is a deliverable, not a gap** — a documented negative result with the row count that produced it. Cite it in the writeup; do not reopen. |
 | B10 | Duration-bias feature pack: `video_duration`, `duration_bucket` (train-quantile groups, default 10, D2Q-style), `pcr_hist` (historical play_time/duration ratio aggregates per user and per video, train-only, with the existing time-decay + EB smoothing), `long_view_rate_by_duration_group` (target encoding of `long_view` within duration bucket, train-only, EB-smoothed). | B2, B3 | Each feature fits on train only and passes the existing leakage tests. Quantile bucket edges computed on train are reused unchanged for validation/test (assert no re-fitting). All four registered and callable by name. |
 | B11 | Auxiliary-signal historical rates: per-user and per-video past rates for `click`, `like`, `follow`, `long_view`, time-decayed and EB-smoothed, where the value for a row on date *t* uses only rows with date < *t*. | B2, B3 | `test_aux_rates.py` on synthetic data: a feature value never changes when future-dated rows are edited; same-day rows are excluded. Registered in the feature registry. |
 | B12 | Within-user variance screen. `screen.py` computes, for every registered feature, its mean within-user variance on the validation split. Features below threshold (default 1e-9) are flagged `metric_inert: true` — constant within user, hence invisible to GAUC/nDCG@5 except through interactions (5.3, trap re: pure user-side terms). The report feeds A10's prompt injection. | B2, B3, B10, B11 | `test_screen.py`: a pure user-level feature (e.g. `user_activity`) is flagged inert; a video-varying feature is not. Report file schema documented in Section 8 style. |
 | B13 | Data-usage checker. `data_usage.py` runs pre-flight: lists every data file shipped in the starter kit / KuaiRand download (user features, video features, both log files) and asserts each is either joined into the pipeline or explicitly listed in an `EXCLUDED = {...: reason}` map. | B1 | Running with a shipped file neither joined nor excluded exits non-zero and names the file. The exclusion map with reasons is printed into the run log (judge-visible). |
+| B14 | **New — cheap probe, gates C10.** `sim_to_history`: item–item co-occurrence similarity (cosine on co-view/co-like counts; optionally Swing) between a candidate video and the user's train-only interaction history, aggregated (mean of top-k, or decayed mean) into a single registered feature. This is the organisers' #2-ranked headroom direction (user-history × candidate interaction) at feature cost instead of model cost — see `RECSYS_COURSE_ANALYSIS.md` §3.1. | B2, B3, B11 | Fits on train-only co-occurrence counts, passes leakage tests. `test_sim_to_history.py`: a candidate video that co-occurs heavily with a user's history scores higher than one that never does, on a synthetic fixture. Registered and callable by name. **Decision gate:** FM + 5 official fields + `sim_to_history`, confirm-tier (5 seeds) vs. baseline. Clears `MIN_DELTA_FLOOR` with a CI excluding zero → funds C10. Lands inside noise → C10 is not built; go straight to B10's re-spec and C11/C12. |
+| B10-fix | **New — correction to B10, not new work. Upgraded from "likely mis-specified" to confirmed dead by `tools/screen.py` (run 2026-08-31): `pcr_hist` is `metric_inert` with mean within-user variance exactly `0.000e+00` — it contributes literally nothing to ranking, not just less than hoped.** Root cause is structural, not the duration confound alone: `pcr_hist` (`pipeline/features.py::pcr_hist`) is a per-**user** aggregate (`groupby("user_id")`), so every candidate video for a given user receives the identical value — it cannot discriminate within a user's 4-candidate list by construction, independent of the duration-confound issue described in `RECSYS_COURSE_ANALYSIS.md` §2.4/§3.4 (raw completion ratio duration-confounded 5.2× vs. the label's 1.4×). Re-normalising the formula without changing the grain would stay inert. | B10 | Add a per-**video** completion-ratio history (varies by candidate, not just by user) — the "natural follow-up... not attempted" already flagged in the `pcr_hist` docstring — duration-normalised per §3.4 (compare against the bucket's own median completion, not raw play_time/duration). Confirm via `tools/screen.py` that the new feature is not `metric_inert`. Ablate old vs new via A10 at screen tier; report the delta. A regression is an acceptable, reportable outcome. The other 7 features `screen.py` flagged inert (`user_ctr`, `user_activity`, `user_ctr_decayed`, `user_{click,like,follow,long_view}_rate_decayed`) are pure per-user aggregates with the same structural cause — expected, not bugs; leave as-is, they may still contribute through blending/interactions per §5.4. |
 
-**Note on B8:** highest-upside item in the project for Innovation scoring. Attempt only after B1 to B7 are green.
+**Note on B8:** closed — see row above. **Highest current upside item for Innovation scoring is now B14.**
 
 ### 9.3 Workstream C: Models, losses, and tuning
 **Owner: Ethan** · Files: `pipeline/models/*`, `pipeline/train.py`
@@ -843,9 +862,13 @@ class BaseModel(Protocol):
 | C6 | Optuna with `MedianPruner` and SQLite storage | C1, B2 | A 20-trial study completes; pruning cuts total time by 30%+; study resumable after kill; objective evaluated on internal folds |
 | C7 | Blending per 6.9, four methods, `rank_avg` default | C1, D2 | Blend of two fixed nodes reproduces exactly; per-user Spearman reported; blend rejected unless it beats both parents on folds and official metric; weights fitted on internal folds only |
 | C8 | Within-user pairwise loss as a loss-drawer entry: BPR-style logistic pairwise loss with pairs drawn only within the same user, for the FM stack. Also, LightGBM LambdaRank `group` boundaries must equal user boundaries — the structural match between loss and the per-user metrics. | C1, C3 | **Mostly implemented.** `test_pairwise.py`: no training pair spans two users; BPR variant trains end-to-end through the standard `(user_ids, labels, scores)` interface. — `pipeline/models/fm.py` has `loss="pairwise"` (BPR sampled within-user via `_build_pair_index`/`_sample_pairs`), covered by `tests/test_models.py::test_fm_pairwise_*`: determinism, a "not a silent no-op" regression test, and the within-user-pairs guard. Confirm-tier check on real data: delta over baseline +0.0008, ~1σ of seed noise — a real result (not yet a proven win), see trap 13. **Now complete:** `lgbm.py::_assert_group_boundaries` checks each lambdarank group is exactly one user's contiguous rows and is called from `fit()` on both the train and validation groupings; `tests/test_lgbm.py` covers five mis-grouping modes plus a guard test that drives the production path with a corrupted `_group_order`, verified to fail when the assertion call is removed. LightGBM takes `group` positionally and validates nothing beyond the total, so a mismatched grouping would otherwise train silently with ranks optimised across user boundaries. |
-| C9 | *(Stretch — only after C1–C8 green.)* Multi-task DeepFM: shared embedding table, auxiliary sigmoid heads for `click` and `like` with Optuna-tunable loss weights. Inference emits only the `long_view` head score. | C6 | **Not implemented.** Auxiliary heads affect training loss only; output shape/interface unchanged. One full train+eval ≤ 10 min CPU. With aux weights = 0, validation primary matches the single-task DeepFM within 0.001. — `deepfm_mtl` is registered in `MODEL_REGISTRY` but its constructor raises `NotImplementedError` (`pipeline/models/deepfm.py`), and `agent/schema.py`'s `Config` validator rejects it at proposal time so the loop doesn't burn an iteration discovering that. Building C9 for real requires removing `deepfm_mtl` from `UNIMPLEMENTED_MODELS` in `agent/schema.py` as part of the same change. |
+| C9 | *(Stretch — only after C1–C8 green.)* Multi-task DeepFM: shared embedding table, auxiliary sigmoid heads for `click` and `like` with Optuna-tunable loss weights. Inference emits only the `long_view` head score. | C6 | **Implemented and merged.** `DeepFMMultiTask` (`pipeline/models/deepfm.py`) has `AUX_TARGETS = ("is_click", "is_like")`, Optuna-tunable `aux_click_weight`/`aux_like_weight`, primary-head-only early stopping. RNG-quarantined aux-head construction (saving/restoring `torch.get_rng_state()` around `nn.Linear` init) so aux weights = 0 is bit-exact to the single-task model. `deepfm_mtl` removed from `UNIMPLEMENTED_MODELS` in `agent/schema.py`. **Not yet used:** this is the single-task-baseline half of Phase 4 (§3.5) of `RECSYS_COURSE_ANALYSIS.md` — fusing the aux head *outputs* into the ranking score at inference, rather than only using them as training regularisers. That fusion is C13 below. |
+| C10 | **New — gated on B14.** DIN: attention over the user's LastN history (n ≈ 10–30, median 31 rows/user measured) with a time-since-interaction embedding, replacing plain mean-pooling for the history representation used alongside `sim_to_history`. See §3.2. **Do not build if B14 lands inside noise** — SIM-style truncation is explicitly out (sequences are too short to need it; see §2.3). | B14, C5 | Only funded if B14 clears its confirm-tier gate. Attention form only, never plain average-pooling (that variant is not a test of the hypothesis). Trains on CPU in reasonable time given n≤31. Confirm-tier (5 seeds) before any claim of improvement. |
+| C11 | **New — independent of C10, cheap.** LHUC / PPNet-style user-conditioned modulation on DeepFM: a small per-user gating vector rescales hidden-layer activations. Cheapest structural change aimed at within-user discrimination. See §3.3. | C5 | Adds a per-user gate learned from `user_id` embedding; ablatable via A10 (gate on/off). Confirm-tier before claiming a delta. |
+| C12 | **New — independent of C10/C11, cheap.** SENet field-weighting: a squeeze-excitation block over the field embeddings before the FM/DeepFM interaction layer, learning per-field importance weights per example. See §3.6. | C5 | Ablatable via A10. Confirm-tier before claiming a delta. |
+| C13 | **New — Phase 4, after C9's single-task baseline is trustworthy.** Multi-task score fusion: combine the `long_view` head with the `is_click`/`is_like` aux head outputs into the final ranking score via rank-based fusion (reuse C7's blending machinery), weights fit on internal folds only. See §3.5. | C9, C7 | Fusion weights fit on internal folds, never official validation. Rejected unless it beats the `long_view`-only head on folds and on the official metric — same acceptance discipline as C7. |
 
-**Deprioritised:** multi-task DeepFM (rung 5, tracked as C9) only if ahead of schedule. Sequence models (rung 6) not attempted. CatBoost optional.
+**Deprioritised:** sequence models beyond DIN (SASRec-style, rung 6) not attempted — median 31 rows/user does not justify them. CatBoost optional. Session-position proxy (§3.7) unscheduled, attempt only if time allows.
 
 ### 9.4 Workstream D: Integrity, statistics, reporting, demo
 **Owner: Pinxin** · Files: `pipeline/evaluate.py` (copy only), `agent/gate.py`, `agent/manifest.py`, `tools/*`, `README.md`, `agent/knowledge.md`
@@ -864,7 +887,7 @@ class BaseModel(Protocol):
 | D10 | *(Optional)* walkthrough video with injected-failure demo | D9 | See Section 14.2 |
 | D12 | Promotion-threshold correction (**amends 6.6's statistical gate — closes the noise-floor issue named in trap 5**). Accept requires BOTH: user-level bootstrap 95% CI of the primary-delta excludes 0, AND point delta ≥ 0.002 (= ε, ≈ 2.5σ of the baseline's 5-seed std 0.0008). | D2 | **Implemented, at the call site rather than in `gate.accept()` itself.** `test_gate.py`: synthetic +0.001 delta with tight CI is rejected (threshold), +0.004 with CI spanning 0 is rejected (noise), +0.004 with CI > 0 is accepted. — The frozen 8.8 contract for `gate.accept()` is untouched (it still returns the bootstrap-CI verdict alone); the combined rule lives in `agent/loop.py::_accept_full`, which requires both the CI check and `primary - max(baseline, incumbent) >= MIN_DELTA_FLOOR` before accepting a full-tier node, and records `gates`/`ci_95`/`delta_vs_best` on the node so the decision is auditable. `tests/test_loop.py` covers all three cases from this row's acceptance criteria by name. This closes a real incident: a run once accepted its first full node (primary 0.5837, *below* the shipped 0.6016 baseline) unconditionally and used it as the reference for the rest of the run. |
 | D13 | Leakage canary probes, pre-flight: (a) permute `long_view` labels within user on train, retrain the cheapest model — validation GAUC must land in 0.5 ± 0.02; (b) a deliberately leaky fixture feature (built from future `long_view`) must trip the alarm. Run once before iteration 1 and record the result in the run log. | B2, C2 | Both canaries implemented as pytest + a `--preflight` CLI mode. Injected leaky feature raises; clean pipeline passes. Preflight result appears in the run log header. |
-| D14 | Judge-visible reporting of the new machinery: run-log renderer shows, per iteration, the strike counter (A11), any `scheduler_forced` flag, the latest ablation sensitivity table (A10), citations (A12), and the metric-inert feature list (B12). Add the ablation table + solution tree to the demo script. | A10, A11, A12, B12, D7 | Rendered log for a 5-iteration mock run contains all five elements. Demo script section drafted with one screenshot placeholder per element. |
+| D14 | Judge-visible reporting of the new machinery: run-log renderer shows, per iteration, the strike counter (A11), any `scheduler_forced` flag, the latest ablation sensitivity table (A10), citations (A12), and the metric-inert feature list (B12). **New:** also surface the candidate-count diagnostics from §5.4 (median 4 candidates/user, 57.8% GAUC-usable) once, in the report header — without this, a +0.002 delta reads as trivial to a judge; with it, it's legible as a large effect on this task. Add the ablation table + solution tree to the demo script. | A10, A11, A12, B12, D7 | Rendered log for a 5-iteration mock run contains all five elements plus the header diagnostics. Demo script section drafted with one screenshot placeholder per element. |
 
 **Pinxin also owns** the live Rich terminal view of the node tree. Roughly 40 lines, and it materially improves the demo over scrolling logs.
 
@@ -900,7 +923,7 @@ Nothing else starts until this is done.
 
 ### 10.4 Day 3
 
-- **Morning:** B8 if time, D7, D8, final run
+- **Morning:** B14 (sim_to_history + confirm-tier gate) if time, D7, D8, final run
 - **Afternoon:** D9, optional D10
 - **Buffer:** 3 hours minimum before deadline
 
@@ -908,7 +931,7 @@ Nothing else starts until this is done.
 
 Cut in this order. Each cut costs less than the one below it.
 
-1. **B8** exposure debiasing. High upside, stretch by design.
+1. **B14** `sim_to_history` + DIN (C10). High upside, gated probe by design — cut the DIN half first, B14 itself is cheap.
 2. **C7** blending. Nice demo moment, modest score impact.
 3. **A7** family-diverse selection. Fall back to always extending the best node.
 4. **C5** DeepFM. Ship LightGBM plus FM only. Costs headroom, keeps the agent story intact.
