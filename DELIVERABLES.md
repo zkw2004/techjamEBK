@@ -29,12 +29,28 @@ python -m tools.report \
 
 - [Devpost narrative](DEVPOST.md)
 - [Three-minute walkthrough and recovery demo](WALKTHROUGH.md)
-- Final submission: generated with `python -m tools.finalise` only after the
-  ledger contains an accepted, successful `full` or `confirm` node. This
-  safeguard prevents an unpromoted pilot or fabricated winner from reaching
-  the hidden test set.
+- [Final submission](submission.csv) — generated with `cli.py finalize` (`make
+  finalize`) only after the ledger contained an accepted, successful `full`
+  node. This safeguard prevents an unpromoted pilot or fabricated winner from
+  reaching the hidden test set.
 
-At this snapshot the ledger has no accepted full/confirm node, so a valid final
-CSV cannot yet be generated. Run the autonomous full-fidelity workflow to earn
-an acceptance, then invoke finalisation with that node ID and retain the
-organiser check output alongside the submission.
+## Results summary (D5)
+
+Converged run: 21 nodes, stop reason `converged`. Full figures and the run's
+best measured-but-unpromoted candidate are in
+[DEVPOST.md](DEVPOST.md#results-converged-run-artifactsexperiment-reportmdjson);
+the numbers below are the two the submission is scored on.
+
+| | Validation primary | GAUC | nDCG@5 | Δ vs. published baseline (0.6016) |
+|---|---|---|---|---|
+| Accepted node (n003, submitted) | 0.601684 | 0.667311 | 0.536057 | +0.000084 (within one seed-std) |
+
+`submission.csv` is the five-seed, train+validation refit of this node,
+validated against the organiser's unmodified `submit.py --check`
+(170,588 rows, `split=test`).
+
+No candidate the loop proposed cleared the project's own promotion gate
+(point delta ≥ 0.002 **and** a bootstrap 95% CI excluding zero), so the
+seeded baseline anchor remains the validation-best accepted checkpoint and
+is what was finalised. See DEVPOST.md for the closest candidate that did
+not clear the gate, and why the run converged after only 21 nodes.
