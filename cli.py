@@ -106,7 +106,12 @@ def _baseline(seed: int) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    commands = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="run the independent D13 leakage canaries and exit",
+    )
+    commands = parser.add_subparsers(dest="command")
     for name in ("selfcheck", "baseline"):
         command = commands.add_parser(name)
         command.add_argument("--seed", type=int, default=42)
@@ -126,6 +131,19 @@ def main(argv: list[str] | None = None) -> int:
     report = commands.add_parser("report")
     report.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.preflight:
+        if args.command is not None:
+            parser.error("--preflight cannot be combined with a command")
+        from tools.leak_preflight import record_preflight, run_preflight, write_result
+
+        result = run_preflight()
+        write_result(result)
+        record_preflight(result)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.command is None:
+        parser.error("a command or --preflight is required")
 
     if args.command == "selfcheck":
         return _selfcheck(args.seed)
