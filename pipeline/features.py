@@ -473,11 +473,24 @@ def decay_weights(dates, cutoff, half_life_days: float = 7.0) -> np.ndarray:
 def user_ctr_decayed(train_df, target_df) -> np.ndarray:
     """Time-decayed, EB-smoothed historical long-view rate per user.
 
-    The train-wide maximum date is the decay cutoff. The global prior is the
-    unweighted training label mean, matching Appendix A.1. Alpha and half-life
-    use helper defaults here; alternative values must be screened on B2's
-    internal folds before a caller adopts them.
+    On the cross-frame path, the train-wide maximum date is the decay cutoff
+    and the global prior is the unweighted training label mean. On the
+    training-matrix path (``train_df is target_df``), each row instead sees
+    only strictly earlier events: using the whole-frame mean there would leak
+    later outcomes into the training row. This distinction is essential
+    because :func:`pipeline.train._matrix` invokes every registered feature
+    on both paths.
+
+    Alpha and half-life use helper defaults here; alternative values must be
+    screened on B2's internal folds before a caller adopts them.
     """
+    if train_df is target_df:
+        # B11's generic helper supplies the required strict-prior, same-time
+        # exclusion semantics. The helper is defined later in this module,
+        # but names are resolved when this feature is called (after module
+        # initialisation), not while the decorator registers it.
+        return _in_sample_decayed_smoothed_rate(train_df, "user_id", LABEL)
+
     _assert_historical_cutoff(train_df, target_df)
     labels = _numeric_labels(train_df)
     dates = _parse_dates(train_df["date"])
