@@ -25,6 +25,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent import ablate
 from agent.gate import MIN_DELTA_FLOOR
 from agent.manifest import BASELINE_VALIDATION as BASELINE_VALIDATION_PRIMARY
 from agent.schema import FAMILIES, Action
@@ -278,6 +279,13 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
         "Here is the run so far. Propose exactly one next experiment.\n\n"
         + json.dumps(context, indent=2, default=str)
     )
+    # A10: the incumbent's ablation table is stored as a field of the node it
+    # describes, so it arrives here on `parent`. Rendered as markdown rather
+    # than left inside the JSON blob — it is the one part of the context meant
+    # to be read as a table and reasoned from, not parsed.
+    sensitivity = ablate.render_sensitivity_table((parent or {}).get("ablation"))
+    if sensitivity:
+        user += "\n\n" + sensitivity
 
     total = {"in": 0, "out": 0, "model": PROPOSE_MODEL, "cache_read": 0, "cache_write": 0}
     last_error: str | None = None

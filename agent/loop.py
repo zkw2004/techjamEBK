@@ -16,7 +16,7 @@ from copy import deepcopy
 from statistics import median
 from typing import Any
 
-from agent import execute, gate, manifest, propose, recovery, store
+from agent import ablate, execute, gate, manifest, propose, recovery, schedule, store
 from agent.schema import FAMILIES, Action
 
 EPSILON = 0.002
@@ -141,13 +141,25 @@ def converged(history: list[dict]) -> bool:
     return all(score <= prior_best + EPSILON for score in primaries[-window:])
 
 
-def _persist(node: dict, *, tokens: dict | None = None, repair_attempted: bool = False) -> dict:
+def _persist(
+    node: dict,
+    *,
+    tokens: dict | None = None,
+    repair_attempted: bool = False,
+    extra: dict | None = None,
+) -> dict:
     """Write one completed attempt and return its normalised ledger record.
 
     ``accepted`` is not decided here — it is baked into ``node`` already, by
     C1's ``execute()`` applying ``accept_fn`` to the raw result before this
     function ever sees it (the Section 8.7 node shape has dropped the score
     arrays accept/reject needs by this point).
+
+    ``extra`` carries fields that are only knowable at write time and belong to
+    this node rather than to the executor's result — A10's ablation table and
+    A11's ``scheduler_forced`` flag. The ledger is append-only, so a table that
+    describes a node has to be written *with* it; there is no second chance to
+    attach one afterwards.
     """
     record = deepcopy(node)
     record["manual_intervention"] = False
@@ -155,6 +167,8 @@ def _persist(node: dict, *, tokens: dict | None = None, repair_attempted: bool =
         record["tokens"] = tokens
     if repair_attempted:
         record["repair_attempted"] = True
+    if extra:
+        record.update(extra)
     path = store.write(record)
     return store.read(path.stem)
 
@@ -201,6 +215,8 @@ def _execute_with_recovery(
     timeout_s: int,
     sleep_fn: Callable[[float], None],
     accept_fn: Callable[[dict], bool] | None = None,
+    extra: dict | None = None,
+    extra_fn: Callable[[dict], dict | None] | None = None,
 ) -> tuple[dict, Action, list[dict]]:
     """Execute one tier and all recovery attempts allowed by A5.
 
@@ -221,15 +237,20 @@ def _execute_with_recovery(
 
     while True:
         active_accept_fn = accept_fn if current_fidelity == fidelity else None
+        executed = execute.execute(
+            current_action,
+            fidelity=current_fidelity,
+            timeout_s=timeout_s,
+            accept_fn=active_accept_fn,
+        )
+        # Computed before the write, because the append-only ledger gives no
+        # opportunity to amend the record afterwards.
+        derived = extra_fn(executed) if extra_fn is not None else None
         record = _persist(
-            execute.execute(
-                current_action,
-                fidelity=current_fidelity,
-                timeout_s=timeout_s,
-                accept_fn=active_accept_fn,
-            ),
+            executed,
             tokens=current_tokens,
             repair_attempted=repair_attempted,
+            extra={**(extra or {}), **(derived or {})},
         )
         records.append(record)
         if record.get("status") == "ok":
@@ -387,6 +408,8 @@ def run(
     sleep_fn: Callable[[float], None] = time.sleep,
     time_fn: Callable[[], float] = time.monotonic,
     seed_baseline: bool = True,
+    ablate_enabled: bool = True,
+    scheduler_enabled: bool = True,
 ) -> list[dict]:
     """Run autonomous candidates through smoke → screen → full.
 
@@ -407,6 +430,13 @@ def run(
     not repeat it. Turn it off only to isolate other behaviour under test:
     without an anchor there is no incumbent score vector, so the first
     candidate is gated on the baseline margin alone.
+
+    ``ablate_enabled`` (A10) runs one ablation round per newly accepted
+    incumbent, costing roughly one screen run per component, and stores the
+    sensitivity table on that node. ``scheduler_enabled`` (A11) forces a hedge
+    action one strike before the convergence rule can end the run. Both
+    default on and exist to be switched off in tests that are measuring
+    something else.
     """
     global LAST_STOP_REASON
     bad_iterations = (
@@ -526,6 +556,32 @@ def run(
             reference_folds_by_parent[parent_id] = folds
         return reference_folds_by_parent[parent_id]
 
+    # A11. Seeded with the official baseline so the first candidate is measured
+    # against the real bar, matching the accept gate rather than treating
+    # whatever ran first as an improvement by default.
+    scheduler = schedule.Scheduler(baseline=BASELINE_VALIDATION_PRIMARY)
+
+    def _scheduler_fields(forced: bool) -> dict:
+        return {"scheduler_forced": forced, "scheduler_strikes": scheduler.strikes}
+
+    def _screen_probe(action: Action, fidelity: str) -> dict:
+        """Executor A10 measures through. Probes are never persisted."""
+        return execute.execute(action, fidelity=fidelity, timeout_s=timeout_s)
+
+    def _ablation_for(node: dict) -> dict | None:
+        """Ablate a newly accepted incumbent, at write time (A10).
+
+        Only accepted full-tier nodes are worth the round: a rejected candidate
+        is not the incumbent the next proposal will branch from, so localising
+        *its* sensitivity would target the wrong solution.
+        """
+        if not ablate_enabled or not node.get("accepted"):
+            return None
+        if node.get("fidelity") not in {"full", "confirm"}:
+            return None
+        table = ablate.ablate(node, execute_fn=_screen_probe)
+        return {"ablation": table} if table else None
+
     if seed_baseline and not _has_baseline_anchor(store.list_nodes()):
         anchor, _action, anchor_records = _execute_with_recovery(
             _baseline_anchor_action(),
@@ -534,6 +590,10 @@ def run(
             timeout_s=timeout_s,
             sleep_fn=sleep_fn,
             accept_fn=_accept_anchor,
+            # The anchor is the incumbent every early proposal branches from,
+            # so its sensitivity table is the most valuable one in the run —
+            # it is the only node guaranteed to exist before iteration 1.
+            extra_fn=_ablation_for,
         )
         written.extend(anchor_records)
         store.append_event(
@@ -556,56 +616,84 @@ def run(
             LAST_STOP_REASON = "time_cap"
             break
         parent = select_parent(history)
+
+        iteration_primary: float | None = None
+        forced = False
         try:
-            action, usage = propose.propose(history, knowledge, parent)
-        except propose.ProposeError as exc:
-            _proposal_failure(exc)
-            continue
+            # A11: one strike before the convergence rule can end the run,
+            # spend the iteration on a hedge instead of another free
+            # exploration. A hedge is built locally, so it costs no tokens.
+            action = scheduler.next_hedge(parent, parent.get("ablation")) if (
+                scheduler_enabled and scheduler.should_hedge()
+            ) else None
+            if action is not None:
+                forced = True
+                usage = {}
+                scheduler.note_hedge_fired()
+            else:
+                try:
+                    action, usage = propose.propose(history, knowledge, parent)
+                except propose.ProposeError as exc:
+                    _proposal_failure(exc)
+                    continue
 
-        smoke, current_action, records = _execute_with_recovery(
-            action,
-            "smoke",
-            tokens=usage,
-            timeout_s=timeout_s,
-            sleep_fn=sleep_fn,
-        )
-        written.extend(records)
-        if smoke.get("status") != "ok" or smoke.get("fidelity") != "smoke":
-            continue
+            smoke, current_action, records = _execute_with_recovery(
+                action,
+                "smoke",
+                tokens=usage,
+                timeout_s=timeout_s,
+                sleep_fn=sleep_fn,
+                extra=_scheduler_fields(forced),
+            )
+            written.extend(records)
+            if smoke.get("status") != "ok" or smoke.get("fidelity") != "smoke":
+                continue
 
-        screen, current_action, records = _execute_with_recovery(
-            current_action,
-            "screen",
-            tokens=None,
-            timeout_s=timeout_s,
-            sleep_fn=sleep_fn,
-        )
-        written.extend(records)
-        if screen.get("fidelity") != "screen" or not _screen_survives(
-            screen, _reference_folds(parent)
-        ):
-            continue
+            screen, current_action, records = _execute_with_recovery(
+                current_action,
+                "screen",
+                tokens=None,
+                timeout_s=timeout_s,
+                sleep_fn=sleep_fn,
+                extra=_scheduler_fields(forced),
+            )
+            written.extend(records)
+            if screen.get("fidelity") != "screen" or not _screen_survives(
+                screen, _reference_folds(parent)
+            ):
+                continue
 
-        full, _, records = _execute_with_recovery(
-            current_action,
-            "full",
-            tokens=None,
-            timeout_s=timeout_s,
-            sleep_fn=sleep_fn,
-            accept_fn=_accept_full,
-        )
-        written.extend(records)
-        store.append_event(
-            {
-                "event": "promotion",
-                "from": "screen",
-                "to": "full",
-                "node": full["id"],
-                "status": full["status"],
-                "accepted": full.get("accepted", False),
-                "manual_intervention": False,
-            }
-        )
+            full, _, records = _execute_with_recovery(
+                current_action,
+                "full",
+                tokens=None,
+                timeout_s=timeout_s,
+                sleep_fn=sleep_fn,
+                accept_fn=_accept_full,
+                extra=_scheduler_fields(forced),
+                extra_fn=_ablation_for,
+            )
+            written.extend(records)
+            iteration_primary = (full.get("metrics") or {}).get("primary")
+            store.append_event(
+                {
+                    "event": "promotion",
+                    "from": "screen",
+                    "to": "full",
+                    "node": full["id"],
+                    "status": full["status"],
+                    "accepted": full.get("accepted", False),
+                    "manual_intervention": False,
+                }
+            )
+        finally:
+            # Every iteration is scored, including ones that ended early at
+            # smoke or screen (a candidate that died cheaply is exactly as
+            # unproductive as one that scored flat) and including hedges. A
+            # hedge resets the counter when it fires, then answers for its own
+            # result here — it is not excused from the accounting it triggered.
+            scheduler.observe(iteration_primary)
+            store.append_event(schedule.iteration_event(scheduler, forced=forced))
 
     return written
 

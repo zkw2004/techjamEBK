@@ -142,7 +142,7 @@ def test_proposal_failure_is_logged_and_the_loop_keeps_going(isolated_loop, monk
 
     assert calls == 2
     events = store.read_events()
-    assert len(events) == 2
+    assert len([e for e in events if e["event"] == "proposal"]) == 2
     assert all(event["manual_intervention"] is False for event in events)
 
 
@@ -430,3 +430,132 @@ def test_baseline_anchor_is_not_repeated_on_a_resumed_run(isolated_loop, monkeyp
 
     assert anchors_after_first == 1
     assert anchors_after_second == 1
+
+
+# --- A10 / A11 integration ---------------------------------------------------
+
+def test_ablation_table_is_written_onto_the_accepted_node(isolated_loop, monkeypatch):
+    """A10: 'Sensitivity table present in node JSON.' The ledger is
+    append-only, so the table has to be written with the node it describes —
+    there is no second chance to attach one afterwards."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.65]))
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: {
+        "base_primary": 0.65,
+        "components": [{"component": "feature:video_ctr", "primary": 0.5,
+                        "delta": -0.15, "sensitivity": 0.15}],
+    })
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False, scheduler_enabled=False)
+
+    accepted = [n for n in store.list_nodes() if n.get("accepted")]
+    assert accepted[0]["ablation"]["components"][0]["component"] == "feature:video_ctr"
+
+
+def test_a_rejected_candidate_is_not_ablated(isolated_loop, monkeypatch):
+    """Ablation localises where the *incumbent's* score comes from. A rejected
+    candidate is not what the next proposal branches from, so probing it would
+    spend a five-minute round describing the wrong solution."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.30]))
+    calls = []
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: calls.append(node) or None)
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False, scheduler_enabled=False)
+
+    assert calls == []
+
+
+def test_the_propose_prompt_carries_the_rendered_sensitivity_table():
+    """A10: 'propose() prompt string contains the rendered table.' It travels
+    on the parent node, so no propose() signature change was needed."""
+    import agent.propose as propose_module
+
+    seen = {}
+
+    class _FakeClient:
+        class messages:
+            @staticmethod
+            def parse(**kwargs):
+                seen["user"] = kwargs["messages"][0]["content"]
+                raise RuntimeError("stop after capturing the prompt")
+
+    propose_module.set_client(_FakeClient())
+    try:
+        parent = {
+            "id": "n004",
+            "ablation": {
+                "base_primary": 0.61,
+                "components": [{"component": "feature:video_ctr", "primary": 0.50,
+                                "delta": -0.11, "sensitivity": 0.11}],
+            },
+        }
+        with pytest.raises(propose_module.ProposeError):
+            propose_module.propose([], "knowledge", parent)
+    finally:
+        propose_module.set_client(None)
+
+    assert "| component |" in seen["user"]
+    assert "feature:video_ctr" in seen["user"]
+
+
+def test_a_hedge_is_forced_at_two_strikes_and_marked_on_the_node(isolated_loop, monkeypatch):
+    """A11: 'Hedge-forced iterations are marked scheduler_forced: true.'"""
+    proposals = []
+
+    def fake_propose(history, _knowledge, parent):
+        proposals.append(parent.get("id"))
+        return _action(len(proposals)), {"in": 1, "out": 1, "model": "fake"}
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (True, (0.01, 0.05)))
+    # First candidate is accepted and becomes the incumbent the hedge builds
+    # on; everything after it scores flat, which is what arms the scheduler.
+    monkeypatch.setattr(
+        loop.execute, "execute", _accept_aware_execute([0.65, 0.6501, 0.6502, 0.6503, 0.6504])
+    )
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: None)
+
+    loop.run(max_iterations=4, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    forced = [n for n in store.list_nodes() if n.get("scheduler_forced")]
+    assert forced, "no hedge fired before the convergence rule could end the run"
+    assert all("scheduler_strikes" in n for n in store.list_nodes())
+
+
+def test_every_iteration_logs_the_strike_counter(isolated_loop, monkeypatch):
+    """A11: 'Strike counter value appears in every iteration's log line.'"""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.30, 0.30, 0.30]))
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: None)
+
+    loop.run(max_iterations=3, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    iterations = [e for e in store.read_events() if e["event"] == "iteration"]
+    assert len(iterations) == 3
+    assert all("strikes" in event for event in iterations)
+
+
+def test_a_failed_proposal_still_counts_as_a_strike(isolated_loop, monkeypatch):
+    """An iteration lost to an unavailable proposer improved nothing, so it
+    has to count — otherwise a run of API failures silently disarms the
+    scheduler at exactly the moment it is most needed."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (_ for _ in ()).throw(
+        ProposeError("service unavailable", usage={"in": 0, "out": 0, "model": "fake"})
+    ))
+
+    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    iterations = [e for e in store.read_events() if e["event"] == "iteration"]
+    assert [event["strikes"] for event in iterations] == [1, 2]
