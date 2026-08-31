@@ -15,58 +15,218 @@
       "fidelity": "screen",
       "status": "ok",
       "accepted": false,
-      "gauc": 0.6053643502550826,
-      "ndcg": 0.48454435982937466,
-      "primary": 0.5449543550422287,
-      "delta_vs_baseline": -0.05664564495777136
+      "gauc": 0.6521099339554667,
+      "ndcg": 0.4979146576885715,
+      "primary": 0.5750122958220191,
+      "delta_vs_baseline": -0.026587704177980953
     },
     {
       "id": "n003",
       "fidelity": "full",
       "status": "ok",
-      "accepted": false,
-      "gauc": 0.6377010886757989,
-      "ndcg": 0.5216864636202064,
-      "primary": 0.5796937761480027,
-      "delta_vs_baseline": -0.021906223851997364
+      "accepted": true,
+      "gauc": 0.6673109387273293,
+      "ndcg": 0.5360570420364241,
+      "primary": 0.6016839903818767,
+      "delta_vs_baseline": 8.399038187667518e-05
     },
     {
       "id": "n004",
-      "fidelity": "smoke",
-      "status": "error",
+      "fidelity": "full",
+      "status": "ok",
       "accepted": false,
-      "gauc": null,
-      "ndcg": null,
-      "primary": null,
-      "delta_vs_baseline": null
+      "gauc": 0.6628964969784407,
+      "ndcg": 0.5343172975262839,
+      "primary": 0.5986068972523623,
+      "delta_vs_baseline": -0.0029931027476377547
     },
     {
       "id": "n005",
       "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n006",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n007",
+      "fidelity": "screen",
       "status": "error",
       "accepted": false,
       "gauc": null,
       "ndcg": null,
       "primary": null,
       "delta_vs_baseline": null
+    },
+    {
+      "id": "n008",
+      "fidelity": "screen",
+      "status": "error",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n009",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n010",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6279556017866726,
+      "ndcg": 0.49000817669585395,
+      "primary": 0.5589818892412634,
+      "delta_vs_baseline": -0.04261811075873667
+    },
+    {
+      "id": "n011",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n012",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.650454368755078,
+      "ndcg": 0.4970083528373755,
+      "primary": 0.5737313607962268,
+      "delta_vs_baseline": -0.02786863920377325
+    },
+    {
+      "id": "n013",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n014",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6529418064659377,
+      "ndcg": 0.498043716542427,
+      "primary": 0.5754927615041823,
+      "delta_vs_baseline": -0.026107238495817753
+    },
+    {
+      "id": "n015",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6518682578988986,
+      "ndcg": 0.4971596993508209,
+      "primary": 0.5745139786248598,
+      "delta_vs_baseline": -0.027086021375140268
+    },
+    {
+      "id": "n016",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n017",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6509676360271266,
+      "ndcg": 0.4970983756519191,
+      "primary": 0.574033005839523,
+      "delta_vs_baseline": -0.027566994160477032
+    },
+    {
+      "id": "n018",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n019",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6537645914040132,
+      "ndcg": 0.4979217415590346,
+      "primary": 0.575843166481524,
+      "delta_vs_baseline": -0.02575683351847602
+    },
+    {
+      "id": "n020",
+      "fidelity": "full",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6662004058928966,
+      "ndcg": 0.535073874284156,
+      "primary": 0.6006371400885263,
+      "delta_vs_baseline": -0.0009628599114737124
+    },
+    {
+      "id": "n021",
+      "fidelity": "full",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6691100083641855,
+      "ndcg": 0.5368101954148049,
+      "primary": 0.6029601018894952,
+      "delta_vs_baseline": 0.0013601018894952022
     }
   ],
   "totals": {
-    "nodes": 5,
-    "tokens_in": 7456,
-    "tokens_out": 9691,
-    "tokens": 17147,
+    "nodes": 21,
+    "tokens_in": 32796,
+    "tokens_out": 7846,
+    "tokens": 40642,
     "gpu_hours": 0.0,
     "manual_interventions": 0
   },
   "iterations": {
-    "pilot": 4,
-    "full": 1,
+    "pilot": 17,
+    "full": 4,
     "other": 0,
     "by_fidelity": {
-      "full": 1,
-      "screen": 1,
-      "smoke": 3
+      "full": 4,
+      "screen": 9,
+      "smoke": 8
     }
   },
   "manual_intervention_definition": "A completed node whose manual_intervention field is true; automated proposals, bounded retries, and recovery actions are not interventions.",
@@ -76,10 +236,186 @@
       "gauc_usable_users_percent": 57.8,
       "interpretation": "A +0.002 primary delta is material when users rank a median of four candidates and only 57.8% contribute to GAUC."
     },
-    "controller_iterations": [],
-    "citations": [],
-    "latest_ablation": null,
-    "metric_inert_features": [],
+    "controller_iterations": [
+      {
+        "iteration": 1,
+        "strikes": 1,
+        "scheduler_forced": false,
+        "hedges_fired": 0,
+        "node": null
+      },
+      {
+        "iteration": 2,
+        "strikes": 1,
+        "scheduler_forced": false,
+        "hedges_fired": 0,
+        "node": null
+      },
+      {
+        "iteration": 3,
+        "strikes": 2,
+        "scheduler_forced": false,
+        "hedges_fired": 0,
+        "node": null
+      },
+      {
+        "iteration": 4,
+        "strikes": 2,
+        "scheduler_forced": false,
+        "hedges_fired": 0,
+        "node": null
+      },
+      {
+        "iteration": 5,
+        "strikes": 1,
+        "scheduler_forced": true,
+        "hedges_fired": 1,
+        "node": null
+      },
+      {
+        "iteration": 6,
+        "strikes": 2,
+        "scheduler_forced": false,
+        "hedges_fired": 1,
+        "node": null
+      },
+      {
+        "iteration": 7,
+        "strikes": 1,
+        "scheduler_forced": true,
+        "hedges_fired": 2,
+        "node": null
+      },
+      {
+        "iteration": 8,
+        "strikes": 2,
+        "scheduler_forced": false,
+        "hedges_fired": 2,
+        "node": null
+      },
+      {
+        "iteration": 9,
+        "strikes": 1,
+        "scheduler_forced": true,
+        "hedges_fired": 3,
+        "node": null
+      },
+      {
+        "iteration": 10,
+        "strikes": 1,
+        "scheduler_forced": true,
+        "hedges_fired": 1,
+        "node": null
+      },
+      {
+        "iteration": 11,
+        "strikes": 2,
+        "scheduler_forced": false,
+        "hedges_fired": 3,
+        "node": null
+      },
+      {
+        "iteration": 12,
+        "strikes": 2,
+        "scheduler_forced": false,
+        "hedges_fired": 1,
+        "node": null
+      }
+    ],
+    "citations": [
+      {
+        "node": "n001",
+        "reference": "BPR \\u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n002",
+        "reference": "BPR \\u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n004",
+        "reference": "BPR \\u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n009",
+        "reference": "BPR \u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n010",
+        "reference": "BPR \u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n013",
+        "reference": "D2Q \\u2014 Zhan et al., KDD 2022"
+      },
+      {
+        "node": "n015",
+        "reference": "D2Q \\u2014 Zhan et al., KDD 2022"
+      },
+      {
+        "node": "n018",
+        "reference": "BPR \u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n019",
+        "reference": "BPR \u2014 Rendle 2009; LambdaRank"
+      },
+      {
+        "node": "n021",
+        "reference": "BPR \u2014 Rendle 2009; LambdaRank"
+      }
+    ],
+    "latest_ablation": {
+      "node": "n003",
+      "base_primary": 0.5741091786349903,
+      "components": [
+        {
+          "component": "feature:tab",
+          "primary": 0.5615786323094448,
+          "delta": -0.01253054632554551,
+          "sensitivity": 0.01253054632554551
+        },
+        {
+          "component": "feature:user_id",
+          "primary": 0.5685320222127864,
+          "delta": -0.0055771564222039105,
+          "sensitivity": 0.0055771564222039105
+        },
+        {
+          "component": "feature:dur_bucket",
+          "primary": 0.5712131369789825,
+          "delta": -0.002896041656007875,
+          "sensitivity": 0.002896041656007875
+        },
+        {
+          "component": "loss:pairwise",
+          "primary": 0.575843166481524,
+          "delta": 0.0017339878465336689,
+          "sensitivity": 0.0017339878465336689
+        },
+        {
+          "component": "feature:author_id",
+          "primary": 0.5735886416133589,
+          "delta": -0.000520537021631462,
+          "sensitivity": 0.000520537021631462
+        },
+        {
+          "component": "feature:video_id",
+          "primary": 0.5737062555796498,
+          "delta": -0.00040292305534050943,
+          "sensitivity": 0.00040292305534050943
+        }
+      ]
+    },
+    "metric_inert_features": [
+      "pcr_hist",
+      "user_activity",
+      "user_click_rate_decayed",
+      "user_ctr",
+      "user_ctr_decayed",
+      "user_follow_rate_decayed",
+      "user_like_rate_decayed",
+      "user_long_view_rate_decayed"
+    ],
     "leakage_preflight": null
   }
 }
