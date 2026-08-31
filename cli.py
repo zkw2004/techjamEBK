@@ -81,10 +81,16 @@ def _selfcheck(seed: int) -> int:
 
 
 def _baseline(seed: int) -> int:
+    from pipeline.data import FIELDS
     from pipeline.train import run_experiment
 
+    # Config.features defaults to ["user_id", "video_id"] (agent/schema.py) —
+    # the official baseline needs all five FIELDS. Passing hparams.n_fields=5
+    # alone is a no-op: FM.__init__ never reads an n_fields hparam, so the
+    # missing "features" key silently trained on two fields and scored near
+    # the popularity baseline (~0.58) instead of ~0.6016.
     result = run_experiment(
-        {"model": "fm", "hparams": {"k": 16, "lr": 0.001, "n_fields": 5}},
+        {"model": "fm", "features": list(FIELDS), "hparams": {"k": 16, "lr": 0.001}},
         fidelity="full",
         seed=seed,
     )

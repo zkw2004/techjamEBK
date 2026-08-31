@@ -79,7 +79,8 @@ def test_ten_candidates_run_unattended_and_cheap_tiers_filter_majority(isolated_
     monkeypatch.setattr(loop.propose, "propose", fake_propose)
     monkeypatch.setattr(loop.execute, "execute", fake_execute)
 
-    loop.run(max_iterations=10, knowledge="fixture", sleep_fn=lambda _seconds: None)
+    loop.run(max_iterations=10, knowledge="fixture", sleep_fn=lambda _seconds: None,
+             seed_baseline=False)
 
     assert len(isolated_loop) == 1
     assert sum(fidelity == "smoke" for _, fidelity in calls) == 10
@@ -118,7 +119,8 @@ def test_transient_failure_uses_a5_retry_without_human_input(isolated_loop, monk
     monkeypatch.setattr(loop.propose, "propose", fake_propose)
     monkeypatch.setattr(loop.execute, "execute", fake_execute)
 
-    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=sleeps.append)
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=sleeps.append,
+             seed_baseline=False)
 
     assert sleeps == [1.0]
     assert [node["status"] for node in store.list_nodes()] == ["error", "ok", "ok", "ok"]
@@ -136,11 +138,11 @@ def test_proposal_failure_is_logged_and_the_loop_keeps_going(isolated_loop, monk
 
     monkeypatch.setattr(loop.propose, "propose", fake_propose)
 
-    assert loop.run(max_iterations=2, knowledge="fixture") == []
+    assert loop.run(max_iterations=2, knowledge="fixture", seed_baseline=False) == []
 
     assert calls == 2
     events = store.read_events()
-    assert len(events) == 2
+    assert len([e for e in events if e["event"] == "proposal"]) == 2
     assert all(event["manual_intervention"] is False for event in events)
 
 
@@ -194,6 +196,7 @@ def test_max_hours_stops_before_the_iteration_cap(isolated_loop, monkeypatch):
         knowledge="fixture",
         sleep_fn=lambda _seconds: None,
         time_fn=lambda: next(clock, 100.0),
+        seed_baseline=False,
     )
 
     assert loop.LAST_STOP_REASON == "time_cap"
@@ -211,7 +214,8 @@ def test_last_stop_reason_reports_the_iteration_cap(isolated_loop, monkeypatch):
     monkeypatch.setattr(loop.propose, "propose", fake_propose)
     monkeypatch.setattr(loop.execute, "execute", fake_execute)
 
-    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _seconds: None)
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _seconds: None,
+             seed_baseline=False)
 
     assert loop.LAST_STOP_REASON == "iteration_cap"
 
@@ -229,51 +233,110 @@ def _full_result(primary: float) -> dict:
 def _accept_aware_execute(primaries_by_call):
     """A fake execute() that genuinely applies accept_fn, like agent/execute.py
     does — needed to exercise run()'s _accept_full wiring, since _success()
-    bypasses execute() entirely and always leaves accepted=False."""
+    bypasses execute() entirely and always leaves accepted=False.
+
+    It must normalise the verdict exactly as execute() does: accept_fn returns
+    a verdict dict carrying the gate's evidence, and a dict is truthy, so a
+    fake that passed it straight through as `accepted` would mark every node
+    accepted regardless of the decision.
+    """
     calls = iter(primaries_by_call)
 
     def fake_execute(action: Action, fidelity: str, timeout_s: int, accept_fn=None) -> dict:
         del timeout_s
+        if fidelity == "screen":
+            # The incumbent's reference screen must score below the candidate,
+            # or the screen gate correctly refuses to spend a full evaluation.
+            reference = action.hypothesis == loop.SCREEN_REFERENCE_HYPOTHESIS
+            folds = [0.50, 0.51, 0.52] if reference else [0.58, 0.59, 0.60]
+            return _success(action, fidelity, folds=folds)
         if fidelity != "full":
             return _success(action, fidelity)
         raw = _full_result(next(calls))
-        accepted = accept_fn(raw) if accept_fn is not None else False
-        return executor._node(action, fidelity, raw, accepted=accepted)
+        verdict = executor._normalise_verdict(accept_fn(raw)) if accept_fn is not None else None
+        accepted = bool(verdict["accepted"]) if verdict is not None else False
+        return executor._node(action, fidelity, raw, accepted=accepted, verdict=verdict)
 
     return fake_execute
 
 
-def test_first_full_success_is_accepted_unconditionally(isolated_loop, monkeypatch):
-    """Nothing to compare against yet — the first full result establishes the
-    reference, matching _screen_survives' identical convention one tier down."""
+def test_first_full_success_below_the_baseline_is_rejected(isolated_loop, monkeypatch):
+    """Regression: a run once accepted its first full node unconditionally.
+
+    That made whatever happened to run first the permanent bar. A real run
+    anchored on a node scoring 0.5837 — below the shipped 0.6016 baseline —
+    and then reported a later 0.6026 as a win. The first candidate is now
+    gated on the official baseline like every other.
+    """
     monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
         _action(0), {"in": 1, "out": 1, "model": "fake"}
     ))
-    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.55]))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.5837]))
 
-    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None)
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
 
     full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
     assert len(full_nodes) == 1
-    assert full_nodes[0]["accepted"] is True
+    assert full_nodes[0]["accepted"] is False
+    assert full_nodes[0]["gates"]["min_delta"] is False
+
+
+def test_a_gain_inside_the_noise_floor_is_rejected(isolated_loop, monkeypatch):
+    """0.6026 over a 0.6016 baseline is +0.0010 — below MIN_DELTA_FLOOR and
+    barely over one seed std. The previous run promoted exactly this."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.6026]))
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    node = [n for n in store.list_nodes() if n["fidelity"] == "full"][0]
+    assert node["accepted"] is False
+    assert node["delta_vs_best"] == pytest.approx(0.6026 - loop.BASELINE_VALIDATION_PRIMARY)
+
+
+def test_a_clear_win_is_accepted_and_records_its_evidence(isolated_loop, monkeypatch):
+    """Above baseline + MIN_DELTA_FLOOR, and the node carries the evidence.
+
+    gates/ci_95/delta_vs_best were `{}`/None on all 69 nodes of the previous
+    run because execute() never wrote them — acceptance was unfalsifiable.
+    """
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.65]))
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    node = [n for n in store.list_nodes() if n["fidelity"] == "full"][0]
+    assert node["accepted"] is True
+    assert node["gates"] == {"statistical": True, "min_delta": True}
+    assert node["delta_vs_best"] == pytest.approx(0.65 - loop.BASELINE_VALIDATION_PRIMARY)
 
 
 def test_second_full_candidate_is_gated_against_the_first(isolated_loop, monkeypatch):
     monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
         _action(0), {"in": 1, "out": 1, "model": "fake"}
     ))
-    # First candidate: 0.55, auto-accepted. Second: 0.90 — a real gate.accept
-    # call would need real per-row alignment against the official validation
-    # set, so it's mocked here; run()'s wiring is what's under test, not
-    # gate.accept's own bootstrap correctness (covered in test_gate.py).
+    # Both clear the baseline margin. The second must additionally clear the
+    # bootstrap CI against the first — a real gate.accept call would need
+    # per-row alignment against the official validation set, so it is mocked;
+    # run()'s wiring is under test, not gate.accept's bootstrap correctness
+    # (covered in test_gate.py).
     monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (True, (0.01, 0.05)))
-    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.55, 0.90]))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.65, 0.90]))
 
-    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None)
+    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
 
     full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
     assert [n["accepted"] for n in full_nodes] == [True, True]
-    assert [n["metrics"]["primary"] for n in full_nodes] == [0.55, 0.90]
+    assert [n["metrics"]["primary"] for n in full_nodes] == [0.65, 0.90]
+    assert full_nodes[1]["ci_95"] == [0.01, 0.05]
 
 
 def test_rejected_full_candidate_is_never_selected_as_the_next_parent(isolated_loop, monkeypatch):
@@ -285,11 +348,214 @@ def test_rejected_full_candidate_is_never_selected_as_the_next_parent(isolated_l
 
     monkeypatch.setattr(loop.propose, "propose", fake_propose)
     monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (False, (-0.02, 0.01)))
-    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.55, 0.30]))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.65, 0.30]))
 
-    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None)
+    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
 
     full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
     assert [n["accepted"] for n in full_nodes] == [True, False]
     # the rejected node (n002-equivalent) must never become a parent
     assert parents_seen[-1] != full_nodes[1]["id"]
+
+
+def test_screen_gate_compares_like_budgets_not_capped_against_uncapped():
+    """Regression: the screen gate compared a budget-capped candidate against
+    the parent's *uncapped* full-tier folds (pipeline.train.SCREEN_BUDGET_CAPS
+    clamps screen runs but _run_full does not). A candidate that is genuinely
+    better under an equal budget still loses that comparison, which is why a
+    50-iteration run promoted only 2 candidates to full."""
+    capped_candidate = {"status": "ok", "fold_primaries": [0.59, 0.56, 0.55]}
+    parent_full_budget = [0.60, 0.57, 0.56]
+    parent_same_budget = [0.58, 0.55, 0.54]
+
+    assert loop._screen_survives(capped_candidate, parent_full_budget) is False
+    assert loop._screen_survives(capped_candidate, parent_same_budget) is True
+
+
+def test_screen_gate_promotes_when_there_is_no_usable_reference():
+    candidate = {"status": "ok", "fold_primaries": [0.59, 0.56, 0.55]}
+
+    assert loop._screen_survives(candidate, None) is True
+    assert loop._screen_survives(candidate, [0.1, float("nan"), 0.3]) is True
+
+
+def test_baseline_anchor_runs_the_official_five_fields():
+    """Config.features defaults to two fields, so an anchor that omitted them
+    would train user_id x video_id and land near the popularity baseline
+    instead of reproducing 0.6016 — the exact defect that made the previous
+    run's headline comparison invalid."""
+    from pipeline.data import FIELDS
+
+    action = loop._baseline_anchor_action()
+
+    assert action.config.features == list(FIELDS)
+    assert "author_id" in action.config.features
+    assert action.config.model == "fm"
+    assert action.config.hparams == {"k": 16, "lr": 0.001}
+
+
+def test_baseline_anchor_is_seeded_once_and_becomes_the_incumbent(isolated_loop, monkeypatch):
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.6016, 0.90]))
+    monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (True, (0.01, 0.05)))
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None)
+
+    full_nodes = [n for n in store.list_nodes() if n["fidelity"] == "full"]
+    anchor = full_nodes[0]
+    assert anchor["gates"]["baseline_anchor"] is True
+    assert anchor["accepted"] is True  # the reference by construction, not by gate
+    assert loop._has_baseline_anchor(store.list_nodes()) is True
+    assert store.read_events()[0]["event"] == "baseline_anchor"
+
+
+def test_baseline_anchor_is_not_repeated_on_a_resumed_run(isolated_loop, monkeypatch):
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (True, (0.01, 0.05)))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.6016, 0.90, 0.91]))
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None)
+    anchors_after_first = sum(
+        n.get("gates", {}).get("baseline_anchor") is True for n in store.list_nodes()
+    )
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None)
+    anchors_after_second = sum(
+        n.get("gates", {}).get("baseline_anchor") is True for n in store.list_nodes()
+    )
+
+    assert anchors_after_first == 1
+    assert anchors_after_second == 1
+
+
+# --- A10 / A11 integration ---------------------------------------------------
+
+def test_ablation_table_is_written_onto_the_accepted_node(isolated_loop, monkeypatch):
+    """A10: 'Sensitivity table present in node JSON.' The ledger is
+    append-only, so the table has to be written with the node it describes —
+    there is no second chance to attach one afterwards."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.65]))
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: {
+        "base_primary": 0.65,
+        "components": [{"component": "feature:video_ctr", "primary": 0.5,
+                        "delta": -0.15, "sensitivity": 0.15}],
+    })
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False, scheduler_enabled=False)
+
+    accepted = [n for n in store.list_nodes() if n.get("accepted")]
+    assert accepted[0]["ablation"]["components"][0]["component"] == "feature:video_ctr"
+
+
+def test_a_rejected_candidate_is_not_ablated(isolated_loop, monkeypatch):
+    """Ablation localises where the *incumbent's* score comes from. A rejected
+    candidate is not what the next proposal branches from, so probing it would
+    spend a five-minute round describing the wrong solution."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.30]))
+    calls = []
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: calls.append(node) or None)
+
+    loop.run(max_iterations=1, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False, scheduler_enabled=False)
+
+    assert calls == []
+
+
+def test_the_propose_prompt_carries_the_rendered_sensitivity_table():
+    """A10: 'propose() prompt string contains the rendered table.' It travels
+    on the parent node, so no propose() signature change was needed."""
+    import agent.propose as propose_module
+
+    seen = {}
+
+    class _FakeClient:
+        class messages:
+            @staticmethod
+            def parse(**kwargs):
+                seen["user"] = kwargs["messages"][0]["content"]
+                raise RuntimeError("stop after capturing the prompt")
+
+    propose_module.set_client(_FakeClient())
+    try:
+        parent = {
+            "id": "n004",
+            "ablation": {
+                "base_primary": 0.61,
+                "components": [{"component": "feature:video_ctr", "primary": 0.50,
+                                "delta": -0.11, "sensitivity": 0.11}],
+            },
+        }
+        with pytest.raises(propose_module.ProposeError):
+            propose_module.propose([], "knowledge", parent)
+    finally:
+        propose_module.set_client(None)
+
+    assert "| component |" in seen["user"]
+    assert "feature:video_ctr" in seen["user"]
+
+
+def test_a_hedge_is_forced_at_two_strikes_and_marked_on_the_node(isolated_loop, monkeypatch):
+    """A11: 'Hedge-forced iterations are marked scheduler_forced: true.'"""
+    proposals = []
+
+    def fake_propose(history, _knowledge, parent):
+        proposals.append(parent.get("id"))
+        return _action(len(proposals)), {"in": 1, "out": 1, "model": "fake"}
+
+    monkeypatch.setattr(loop.propose, "propose", fake_propose)
+    monkeypatch.setattr(loop.gate, "accept", lambda *_a, **_k: (True, (0.01, 0.05)))
+    # First candidate is accepted and becomes the incumbent the hedge builds
+    # on; everything after it scores flat, which is what arms the scheduler.
+    monkeypatch.setattr(
+        loop.execute, "execute", _accept_aware_execute([0.65, 0.6501, 0.6502, 0.6503, 0.6504])
+    )
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: None)
+
+    loop.run(max_iterations=4, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    forced = [n for n in store.list_nodes() if n.get("scheduler_forced")]
+    assert forced, "no hedge fired before the convergence rule could end the run"
+    assert all("scheduler_strikes" in n for n in store.list_nodes())
+
+
+def test_every_iteration_logs_the_strike_counter(isolated_loop, monkeypatch):
+    """A11: 'Strike counter value appears in every iteration's log line.'"""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (
+        _action(0), {"in": 1, "out": 1, "model": "fake"}
+    ))
+    monkeypatch.setattr(loop.execute, "execute", _accept_aware_execute([0.30, 0.30, 0.30]))
+    monkeypatch.setattr(loop.ablate, "ablate", lambda node, **_k: None)
+
+    loop.run(max_iterations=3, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    iterations = [e for e in store.read_events() if e["event"] == "iteration"]
+    assert len(iterations) == 3
+    assert all("strikes" in event for event in iterations)
+
+
+def test_a_failed_proposal_still_counts_as_a_strike(isolated_loop, monkeypatch):
+    """An iteration lost to an unavailable proposer improved nothing, so it
+    has to count — otherwise a run of API failures silently disarms the
+    scheduler at exactly the moment it is most needed."""
+    monkeypatch.setattr(loop.propose, "propose", lambda *_a: (_ for _ in ()).throw(
+        ProposeError("service unavailable", usage={"in": 0, "out": 0, "model": "fake"})
+    ))
+
+    loop.run(max_iterations=2, knowledge="fixture", sleep_fn=lambda _s: None,
+             seed_baseline=False)
+
+    iterations = [e for e in store.read_events() if e["event"] == "iteration"]
+    assert [event["strikes"] for event in iterations] == [1, 2]

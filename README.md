@@ -147,7 +147,23 @@ an append-only record for every proposal, pilot, failure, and recovery:
 
 ```bash
 python -m agent.loop
-python -m tools.report
+python -m tools.report \
+  --markdown-output artifacts/experiment-report.md \
+  --json-output artifacts/experiment-report.json \
+  --trajectory artifacts/trajectory.png
+```
+
+The report and trajectory are generated only from the append-only node ledger;
+failed or metric-less attempts remain in the ledger and are never interpolated
+into the chart. A submission-ready project narrative is maintained in
+[DEVPOST.md](DEVPOST.md).
+The repository's generated snapshot is indexed in
+[DELIVERABLES.md](DELIVERABLES.md); regenerate it after any ledger change.
+
+During an unattended run, open a second terminal for the live experiment tree:
+
+```bash
+python -m tools.live --watch
 ```
 
 After the statistical gate accepts a full-fidelity winner, create the final
@@ -162,6 +178,13 @@ python -m tools.finalise --node n017 --output submission.csv
 Replace `n017` with the accepted full/confirm node ID. The output has exactly
 `row_id,user_id,video_id,score`; `row_id` is the positional index from
 `pipeline.data.load()`, never a join on user/video pairs.
+
+For the optional finals demo, [WALKTHROUGH.md](WALKTHROUGH.md) provides the
+three-minute shot list and a safe deterministic OOM-recovery replay:
+
+```bash
+python -m tools.oom_demo
+```
 
 ## Limitations
 

@@ -16,11 +16,17 @@ from copy import deepcopy
 from statistics import median
 from typing import Any
 
-from agent import execute, gate, manifest, propose, recovery, store
+from agent import ablate, execute, gate, manifest, propose, recovery, schedule, store
 from agent.schema import FAMILIES, Action
 
 EPSILON = 0.002
 NO_IMPROVEMENT_ITERATIONS = 3
+
+# The bar every full-tier candidate must clear, not merely "whatever ran
+# first". Sourced from the run manifest (D2) so the gate and the recorded
+# contract can never disagree; pipeline/evidence.py carries the same number
+# for its standalone records.
+BASELINE_VALIDATION_PRIMARY = manifest.BASELINE_VALIDATION
 
 # A7: cover all five families before refining any one of them twice; over 40
 # iterations, >=15% of nodes must branch from a non-best parent.
@@ -135,13 +141,25 @@ def converged(history: list[dict]) -> bool:
     return all(score <= prior_best + EPSILON for score in primaries[-window:])
 
 
-def _persist(node: dict, *, tokens: dict | None = None, repair_attempted: bool = False) -> dict:
+def _persist(
+    node: dict,
+    *,
+    tokens: dict | None = None,
+    repair_attempted: bool = False,
+    extra: dict | None = None,
+) -> dict:
     """Write one completed attempt and return its normalised ledger record.
 
     ``accepted`` is not decided here — it is baked into ``node`` already, by
     C1's ``execute()`` applying ``accept_fn`` to the raw result before this
     function ever sees it (the Section 8.7 node shape has dropped the score
     arrays accept/reject needs by this point).
+
+    ``extra`` carries fields that are only knowable at write time and belong to
+    this node rather than to the executor's result — A10's ablation table and
+    A11's ``scheduler_forced`` flag. The ledger is append-only, so a table that
+    describes a node has to be written *with* it; there is no second chance to
+    attach one afterwards.
     """
     record = deepcopy(node)
     record["manual_intervention"] = False
@@ -149,6 +167,8 @@ def _persist(node: dict, *, tokens: dict | None = None, repair_attempted: bool =
         record["tokens"] = tokens
     if repair_attempted:
         record["repair_attempted"] = True
+    if extra:
+        record.update(extra)
     path = store.write(record)
     return store.read(path.stem)
 
@@ -195,6 +215,8 @@ def _execute_with_recovery(
     timeout_s: int,
     sleep_fn: Callable[[float], None],
     accept_fn: Callable[[dict], bool] | None = None,
+    extra: dict | None = None,
+    extra_fn: Callable[[dict], dict | None] | None = None,
 ) -> tuple[dict, Action, list[dict]]:
     """Execute one tier and all recovery attempts allowed by A5.
 
@@ -215,15 +237,20 @@ def _execute_with_recovery(
 
     while True:
         active_accept_fn = accept_fn if current_fidelity == fidelity else None
+        executed = execute.execute(
+            current_action,
+            fidelity=current_fidelity,
+            timeout_s=timeout_s,
+            accept_fn=active_accept_fn,
+        )
+        # Computed before the write, because the append-only ledger gives no
+        # opportunity to amend the record afterwards.
+        derived = extra_fn(executed) if extra_fn is not None else None
         record = _persist(
-            execute.execute(
-                current_action,
-                fidelity=current_fidelity,
-                timeout_s=timeout_s,
-                accept_fn=active_accept_fn,
-            ),
+            executed,
             tokens=current_tokens,
             repair_attempted=repair_attempted,
+            extra={**(extra or {}), **(derived or {})},
         )
         records.append(record)
         if record.get("status") == "ok":
@@ -257,12 +284,19 @@ def _execute_with_recovery(
             return failed_repair, current_action, records
 
 
-def _screen_survives(screen: dict, parent: dict) -> bool:
+def _screen_survives(screen: dict, reference_folds: list[float] | None) -> bool:
     """Apply the Section 6.2 internal-fold promotion rule.
 
-    The first viable candidate establishes an internal baseline.  Thereafter a
-    screen run must have a positive median delta against its parent across the
-    three expanding folds; errors or malformed/non-finite folds never promote.
+    A screen run must have a positive median delta against its reference
+    across the three expanding folds; errors or malformed/non-finite folds
+    never promote. With no usable reference, the candidate promotes — the
+    "first viable candidate" convention.
+
+    ``reference_folds`` must come from a run at the *same* fidelity. Screen
+    budgets are capped (``pipeline.train.SCREEN_BUDGET_CAPS``) while full-tier
+    folds are not, so comparing a capped candidate against an uncapped parent
+    asks it to win while handicapped and rejects genuine improvements as
+    regressions.
     """
     folds = screen.get("fold_primaries", [])
     if screen.get("status") != "ok" or len(folds) != 3:
@@ -270,7 +304,7 @@ def _screen_survives(screen: dict, parent: dict) -> bool:
     if not all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in folds):
         return False
 
-    parent_folds = parent.get("fold_primaries", [])
+    parent_folds = reference_folds or []
     if len(parent_folds) != 3 or not all(
         isinstance(value, (int, float)) and math.isfinite(float(value)) for value in parent_folds
     ):
@@ -280,6 +314,70 @@ def _screen_survives(screen: dict, parent: dict) -> bool:
         for candidate, reference in zip(folds, parent_folds, strict=True)
     ]
     return median(deltas) > 0.0
+
+
+def _baseline_anchor_action() -> Action:
+    """The official FM baseline, as an Action the ordinary executor can run.
+
+    This is the organiser configuration the whole project is measured against
+    (K12): FM, k=16, lr=0.001, over the five official ``FIELDS``. Spelling the
+    features out matters — ``Config.features`` defaults to two fields, so a
+    config that omits them silently trains ``user_id x video_id`` and lands
+    near the popularity baseline instead of 0.6016.
+    """
+    from pipeline.data import FIELDS
+
+    return Action(
+        hypothesis=(
+            "The official FM baseline (five fields, k=16, lr=0.001) reproduces "
+            "validation primary 0.6016 and is the reference every later "
+            "candidate must beat by at least the minimum meaningful delta."
+        ),
+        reasoning=(
+            "Seeded by the loop, not proposed. A run with no baseline node has "
+            "no valid comparison point: whichever candidate happened to run "
+            "first would otherwise become the bar, and a below-baseline first "
+            "result would make later non-improvements look like wins."
+        ),
+        type="config",
+        family="model",
+        parent=ROOT_PARENT["id"],
+        config={"model": "fm", "features": list(FIELDS), "hparams": {"k": 16, "lr": 0.001}},
+    )
+
+
+SCREEN_REFERENCE_HYPOTHESIS = (
+    "Reference screen of the incumbent, for a like-for-like fold comparison."
+)
+
+
+def _screen_reference_action(parent: dict) -> Action | None:
+    """An Action that re-runs the parent's own config at screen fidelity."""
+    config = parent.get("config") or {}
+    if not config.get("model"):
+        return None
+    family = parent.get("family")
+    return Action(
+        hypothesis=SCREEN_REFERENCE_HYPOTHESIS,
+        reasoning=(
+            "Not a candidate: the screen gate needs the incumbent measured under "
+            "the same capped budget as the candidate it is judging."
+        ),
+        type="config",
+        family=family if family in FAMILIES else "model",
+        parent=parent.get("id") or ROOT_PARENT["id"],
+        config=config,
+    )
+
+
+def _has_baseline_anchor(history: list[dict]) -> bool:
+    """Whether this ledger already carries a seeded, successful anchor."""
+    return any(
+        node.get("status") == "ok"
+        and node.get("fidelity") in {"full", "confirm"}
+        and node.get("gates", {}).get("baseline_anchor") is True
+        for node in history
+    )
 
 
 def _proposal_failure(error: propose.ProposeError) -> None:
@@ -309,6 +407,9 @@ def run(
     knowledge: str | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
     time_fn: Callable[[], float] = time.monotonic,
+    seed_baseline: bool = True,
+    ablate_enabled: bool = True,
+    scheduler_enabled: bool = True,
 ) -> list[dict]:
     """Run autonomous candidates through smoke → screen → full.
 
@@ -322,6 +423,20 @@ def run(
     candidate starts, never mid-candidate, so a long-running full evaluation
     is never killed partway through. ``LAST_STOP_REASON`` records which one
     fired: ``"converged"``, ``"iteration_cap"``, or ``"time_cap"``.
+
+    ``seed_baseline`` runs the official FM baseline once, before iteration 1,
+    and installs it as the incumbent. It costs one full-tier evaluation and is
+    skipped when the ledger already carries an anchor, so a resumed run does
+    not repeat it. Turn it off only to isolate other behaviour under test:
+    without an anchor there is no incumbent score vector, so the first
+    candidate is gated on the baseline margin alone.
+
+    ``ablate_enabled`` (A10) runs one ablation round per newly accepted
+    incumbent, costing roughly one screen run per component, and stores the
+    sensitivity table on that node. ``scheduler_enabled`` (A11) forces a hedge
+    action one strike before the convergence rule can end the run. Both
+    default on and exist to be switched off in tests that are measuring
+    something else.
     """
     global LAST_STOP_REASON
     bad_iterations = (
@@ -345,25 +460,151 @@ def run(
     # In-memory reference for the accept gate (Section 6.6, D3). Node records
     # don't persist `seed`, so a past node's raw per-row scores cannot be
     # reliably re-derived across a resumed run() call; scoped to this
-    # invocation. The first full-tier success has nothing to compare against
-    # and establishes the reference — the same "first viable candidate"
-    # convention _screen_survives already uses one tier down.
+    # invocation.
     best_full: dict[str, Any] | None = None
 
-    def _accept_full(raw: dict) -> bool:
+    def _accept_full(raw: dict) -> dict:
+        """Gate one full-tier result and return the verdict plus its evidence.
+
+        Two absolute requirements, both of which the previous implementation
+        skipped for the first full node it ever saw:
+
+        * the candidate must beat ``max(official baseline, best so far)`` by
+          ``MIN_DELTA_FLOOR``. Accepting the first full result unconditionally
+          made whatever ran first the permanent bar — a run anchored on a node
+          scoring *below* the shipped baseline reports later results as wins
+          when they are not.
+        * the bootstrap CI on the delta must exclude zero (Section 6.6). Skipped
+          for the first node, this is what lets seed noise through as evidence.
+
+        There is no score vector for the official baseline, so its gate is the
+        margin check alone; the CI check applies from the second full node on,
+        against the incumbent's actual per-row scores.
+        """
         nonlocal best_full
         primary = raw.get("primary")
         val_scores = raw.get("val_scores")
         val_user_ids = raw.get("val_user_ids")
         if val_scores is None or val_user_ids is None or primary is None:
-            return False  # nothing to gate on; never silently accept
+            # Nothing to gate on; never silently accept.
+            return {"accepted": False, "gates": {"statistical": False}}
+
+        incumbent = best_full["primary"] if best_full is not None else None
+        reference = max(BASELINE_VALIDATION_PRIMARY, incumbent or 0.0)
+        delta = float(primary) - reference
+        clears_margin = delta >= gate.MIN_DELTA_FLOOR
+
+        ci: tuple[float, float] | None = None
         if best_full is None:
-            best_full = {"scores": val_scores, "user_ids": val_user_ids, "primary": primary}
-            return True
-        accepted, _ci = gate.accept(val_scores, best_full["scores"], val_user_ids)
+            ci_excludes_zero = True  # no incumbent score vector to bootstrap against
+        else:
+            ci_excludes_zero, ci = gate.accept(val_scores, best_full["scores"], val_user_ids)
+
+        accepted = bool(clears_margin and ci_excludes_zero)
         if accepted:
             best_full = {"scores": val_scores, "user_ids": val_user_ids, "primary": primary}
-        return accepted
+        return {
+            "accepted": accepted,
+            "delta_vs_best": delta,
+            "ci_95": list(ci) if ci is not None else None,
+            "gates": {
+                "statistical": bool(ci_excludes_zero),
+                "min_delta": bool(clears_margin),
+            },
+        }
+
+    def _accept_anchor(raw: dict) -> dict:
+        """Install the seeded baseline as the incumbent, without gating it.
+
+        The anchor is the reference by construction, so it is not asked to
+        beat itself by MIN_DELTA_FLOOR. Recording it as the incumbent is what
+        gives every later candidate a real score vector to bootstrap against,
+        so the CI check applies from the very first proposed node rather than
+        being skipped for it.
+        """
+        nonlocal best_full
+        val_scores = raw.get("val_scores")
+        val_user_ids = raw.get("val_user_ids")
+        primary = raw.get("primary")
+        if val_scores is None or val_user_ids is None or primary is None:
+            return {"accepted": False, "gates": {"baseline_anchor": False}}
+        best_full = {"scores": val_scores, "user_ids": val_user_ids, "primary": primary}
+        return {
+            "accepted": True,
+            "delta_vs_best": float(primary) - BASELINE_VALIDATION_PRIMARY,
+            "gates": {"baseline_anchor": True},
+        }
+
+    # Screen-budget fold scores per parent id, so the screen gate compares like
+    # with like. Memoised: this costs one extra screen run the first time a
+    # parent is used as a reference, and nothing thereafter. It is deliberately
+    # not persisted — a reference measurement is not an experiment, and the
+    # ledger is the run-log deliverable.
+    reference_folds_by_parent: dict[str, list[float] | None] = {}
+
+    def _reference_folds(parent: dict) -> list[float] | None:
+        parent_id = parent.get("id")
+        if parent_id is None:
+            return None
+        if parent_id not in reference_folds_by_parent:
+            action = _screen_reference_action(parent)
+            folds = None
+            if action is not None:
+                result = execute.execute(action, fidelity="screen", timeout_s=timeout_s)
+                if result.get("status") == "ok":
+                    folds = result.get("fold_primaries") or None
+            reference_folds_by_parent[parent_id] = folds
+        return reference_folds_by_parent[parent_id]
+
+    # A11. Seeded with the official baseline so the first candidate is measured
+    # against the real bar, matching the accept gate rather than treating
+    # whatever ran first as an improvement by default.
+    scheduler = schedule.Scheduler(baseline=BASELINE_VALIDATION_PRIMARY)
+
+    def _scheduler_fields(forced: bool) -> dict:
+        return {"scheduler_forced": forced, "scheduler_strikes": scheduler.strikes}
+
+    def _screen_probe(action: Action, fidelity: str) -> dict:
+        """Executor A10 measures through. Probes are never persisted."""
+        return execute.execute(action, fidelity=fidelity, timeout_s=timeout_s)
+
+    def _ablation_for(node: dict) -> dict | None:
+        """Ablate a newly accepted incumbent, at write time (A10).
+
+        Only accepted full-tier nodes are worth the round: a rejected candidate
+        is not the incumbent the next proposal will branch from, so localising
+        *its* sensitivity would target the wrong solution.
+        """
+        if not ablate_enabled or not node.get("accepted"):
+            return None
+        if node.get("fidelity") not in {"full", "confirm"}:
+            return None
+        table = ablate.ablate(node, execute_fn=_screen_probe)
+        return {"ablation": table} if table else None
+
+    if seed_baseline and not _has_baseline_anchor(store.list_nodes()):
+        anchor, _action, anchor_records = _execute_with_recovery(
+            _baseline_anchor_action(),
+            "full",
+            tokens=None,
+            timeout_s=timeout_s,
+            sleep_fn=sleep_fn,
+            accept_fn=_accept_anchor,
+            # The anchor is the incumbent every early proposal branches from,
+            # so its sensitivity table is the most valuable one in the run —
+            # it is the only node guaranteed to exist before iteration 1.
+            extra_fn=_ablation_for,
+        )
+        written.extend(anchor_records)
+        store.append_event(
+            {
+                "event": "baseline_anchor",
+                "node": anchor.get("id"),
+                "status": anchor.get("status"),
+                "primary": anchor.get("metrics", {}).get("primary"),
+                "manual_intervention": False,
+            }
+        )
 
     LAST_STOP_REASON = "iteration_cap"
     for _ in range(max_iterations):
@@ -375,54 +616,84 @@ def run(
             LAST_STOP_REASON = "time_cap"
             break
         parent = select_parent(history)
+
+        iteration_primary: float | None = None
+        forced = False
         try:
-            action, usage = propose.propose(history, knowledge, parent)
-        except propose.ProposeError as exc:
-            _proposal_failure(exc)
-            continue
+            # A11: one strike before the convergence rule can end the run,
+            # spend the iteration on a hedge instead of another free
+            # exploration. A hedge is built locally, so it costs no tokens.
+            action = scheduler.next_hedge(parent, parent.get("ablation")) if (
+                scheduler_enabled and scheduler.should_hedge()
+            ) else None
+            if action is not None:
+                forced = True
+                usage = {}
+                scheduler.note_hedge_fired()
+            else:
+                try:
+                    action, usage = propose.propose(history, knowledge, parent)
+                except propose.ProposeError as exc:
+                    _proposal_failure(exc)
+                    continue
 
-        smoke, current_action, records = _execute_with_recovery(
-            action,
-            "smoke",
-            tokens=usage,
-            timeout_s=timeout_s,
-            sleep_fn=sleep_fn,
-        )
-        written.extend(records)
-        if smoke.get("status") != "ok" or smoke.get("fidelity") != "smoke":
-            continue
+            smoke, current_action, records = _execute_with_recovery(
+                action,
+                "smoke",
+                tokens=usage,
+                timeout_s=timeout_s,
+                sleep_fn=sleep_fn,
+                extra=_scheduler_fields(forced),
+            )
+            written.extend(records)
+            if smoke.get("status") != "ok" or smoke.get("fidelity") != "smoke":
+                continue
 
-        screen, current_action, records = _execute_with_recovery(
-            current_action,
-            "screen",
-            tokens=None,
-            timeout_s=timeout_s,
-            sleep_fn=sleep_fn,
-        )
-        written.extend(records)
-        if screen.get("fidelity") != "screen" or not _screen_survives(screen, parent):
-            continue
+            screen, current_action, records = _execute_with_recovery(
+                current_action,
+                "screen",
+                tokens=None,
+                timeout_s=timeout_s,
+                sleep_fn=sleep_fn,
+                extra=_scheduler_fields(forced),
+            )
+            written.extend(records)
+            if screen.get("fidelity") != "screen" or not _screen_survives(
+                screen, _reference_folds(parent)
+            ):
+                continue
 
-        full, _, records = _execute_with_recovery(
-            current_action,
-            "full",
-            tokens=None,
-            timeout_s=timeout_s,
-            sleep_fn=sleep_fn,
-            accept_fn=_accept_full,
-        )
-        written.extend(records)
-        store.append_event(
-            {
-                "event": "promotion",
-                "from": "screen",
-                "to": "full",
-                "node": full["id"],
-                "status": full["status"],
-                "accepted": full.get("accepted", False),
-                "manual_intervention": False,
-            }
-        )
+            full, _, records = _execute_with_recovery(
+                current_action,
+                "full",
+                tokens=None,
+                timeout_s=timeout_s,
+                sleep_fn=sleep_fn,
+                accept_fn=_accept_full,
+                extra=_scheduler_fields(forced),
+                extra_fn=_ablation_for,
+            )
+            written.extend(records)
+            iteration_primary = (full.get("metrics") or {}).get("primary")
+            store.append_event(
+                {
+                    "event": "promotion",
+                    "from": "screen",
+                    "to": "full",
+                    "node": full["id"],
+                    "status": full["status"],
+                    "accepted": full.get("accepted", False),
+                    "manual_intervention": False,
+                }
+            )
+        finally:
+            # Every iteration is scored, including ones that ended early at
+            # smoke or screen (a candidate that died cheaply is exactly as
+            # unproductive as one that scored flat) and including hedges. A
+            # hedge resets the counter when it fires, then answers for its own
+            # result here — it is not excused from the accounting it triggered.
+            scheduler.observe(iteration_primary)
+            store.append_event(schedule.iteration_event(scheduler, forced=forced))
 
     return written
 

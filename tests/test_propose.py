@@ -12,6 +12,7 @@ import types
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from agent import propose as P
 from agent.schema import Action
@@ -183,12 +184,27 @@ def test_inconsistent_actions_are_rejected(kwargs, message):
         P.check_action_consistency(action)
 
 
-def test_blend_needs_two_parents():
+def test_blend_needs_exactly_two_distinct_parents():
+    """The Config validator now rejects this at parse time, so a malformed
+    blend never reaches check_action_consistency. Structured output makes that
+    a schema violation the model is re-asked about, which is cheaper than the
+    old path: pass proposal, then die in the runner and burn an iteration."""
+    for parents in (["n001"], ["n001", "n002", "n003"], ["n001", "n001"]):
+        with pytest.raises(ValidationError, match="exactly two distinct"):
+            Action(
+                hypothesis="h", reasoning="r", type="blend", family="ensemble",
+                parent="n001", config={"model": "blend", "parents": parents},
+            )
+
+
+def test_blend_consistency_still_checks_the_model_field():
+    """A two-parent blend Action whose config.model is not "blend" parses, so
+    check_action_consistency remains the layer that catches it."""
     action = Action(
         hypothesis="h", reasoning="r", type="blend", family="ensemble", parent="n001",
-        config={"model": "blend", "parents": ["n001"]},
+        config={"model": "fm", "parents": ["n001", "n002"]},
     )
-    with pytest.raises(P.ProposeError, match="two parents"):
+    with pytest.raises(P.ProposeError, match="config.model == 'blend'"):
         P.check_action_consistency(action)
 
 
