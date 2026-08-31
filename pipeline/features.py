@@ -747,6 +747,112 @@ def _completion_ratio(train_df) -> pd.Series:
     return pd.Series(np.clip(ratio, 0.0, 1.0), index=train_df.index)
 
 
+def _duration_relative_completion(train_df) -> tuple[np.ndarray, np.ndarray]:
+    """Return completion ratios relative to their train-fit duration median.
+
+    Raw completion is duration-confounded: a 90% completion of a short clip
+    and a 90% completion of a long clip do not carry the same evidence. Fit
+    the duration buckets and their median completion ratios on ``train_df``
+    only, then map each value through ``ratio / (ratio + bucket_median)``.
+    The transform is bounded in ``[0, 1]`` (so it remains valid for
+    ``eb_smooth``), equals 0.5 at the bucket median, and preserves the useful
+    ordering above and below that baseline.
+
+    Returns both the bounded relative completion values and their bucket IDs.
+    The caller must never invoke this on a target frame: ``play_time_ms`` is a
+    post-impression signal and is legal only on the fitting side.
+    """
+    ratio = _completion_ratio(train_df).to_numpy(dtype=np.float64)
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    buckets = _apply_duration_buckets(train_df, edges)
+    medians = pd.DataFrame({"_bucket": buckets, "_ratio": ratio}).groupby(
+        "_bucket", sort=False
+    )["_ratio"].median()
+    bucket_medians = pd.Series(buckets).map(medians).to_numpy(dtype=np.float64)
+    denominator = ratio + bucket_medians
+    relative = np.divide(
+        ratio,
+        denominator,
+        out=np.full(len(ratio), INITIAL_RATE, dtype=np.float64),
+        where=denominator > 0,
+    )
+    return relative, buckets
+
+
+def _prior_duration_bucket_medians(
+    ratios: np.ndarray,
+    buckets: np.ndarray,
+    times: pd.Series,
+) -> np.ndarray:
+    """Median completion before each event in its duration bucket.
+
+    ``groupby(...).expanding().median()`` computes medians in vectorised
+    pandas code. Taking its value only at the last row of each timestamp and
+    shifting that timestamp state makes same-time rows invisible to one
+    another. This is the median analogue of ``_prior_group_stats`` and keeps
+    the training-matrix path strictly historical rather than fitting a bucket
+    baseline on future ``play_time_ms`` values.
+    """
+    source = pd.DataFrame(
+        {
+            "_position": np.arange(len(ratios)),
+            "_bucket": buckets,
+            "_time": times.to_numpy(),
+            "_ratio": ratios,
+        }
+    ).sort_values(["_bucket", "_time", "_position"], kind="stable")
+    source["_through_time_median"] = source.groupby("_bucket", sort=False)[
+        "_ratio"
+    ].transform(lambda values: values.expanding().median())
+    through_time = source.groupby(["_bucket", "_time"], sort=False)[
+        "_through_time_median"
+    ].last()
+    prior_by_time = through_time.groupby(level=0, sort=False).shift(1)
+    keys = pd.MultiIndex.from_frame(source[["_bucket", "_time"]])
+    prior = prior_by_time.reindex(keys).to_numpy(dtype=np.float64)
+    prior = np.where(np.isfinite(prior), prior, INITIAL_RATE)
+    result = np.empty(len(source), dtype=np.float64)
+    result[source["_position"].to_numpy(dtype=int)] = prior
+    return result
+
+
+def _in_sample_duration_relative_completion(train_df) -> np.ndarray:
+    """Leak-safe counterpart of ``_duration_relative_completion``.
+
+    Bucket edges use static video duration and may be fit on the whole frame;
+    the bucket completion median is outcome-derived and therefore uses only
+    strictly earlier events. A bucket with no prior event uses the fixed 0.5
+    neutral reference instead of a future-derived statistic.
+    """
+    ratio = _completion_ratio(train_df).to_numpy(dtype=np.float64)
+    times = _event_times(train_df)
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    buckets = _apply_duration_buckets(train_df, edges)
+    medians = _prior_duration_bucket_medians(ratio, buckets, times)
+    return np.divide(
+        ratio,
+        ratio + medians,
+        out=np.full(len(ratio), INITIAL_RATE, dtype=np.float64),
+        where=(ratio + medians) > 0,
+    )
+
+
+def _in_sample_video_completion_ratio_hist(train_df) -> np.ndarray:
+    """Strict-prior, decayed/EB video completion history for fit rows."""
+    relative = _in_sample_duration_relative_completion(train_df)
+    times = _event_times(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("video_completion_ratio_hist requires valid training dates")
+    weights = decay_weights(dates, dates.max())
+    values = pd.Series(relative, index=train_df.index)
+    prior_weighted, prior_weight = _prior_group_decayed_stats(
+        train_df, values, times, "video_id", weights
+    )
+    global_rates = _prior_global_rates(values, times)
+    return (prior_weighted + 20.0 * global_rates) / (prior_weight + 20.0)
+
+
 def _in_sample_pcr(train_df) -> np.ndarray:
     """In-sample (`train_df is target_df`) leak-safe completion-ratio rate.
 
@@ -867,6 +973,45 @@ def pcr_hist(train_df, target_df) -> np.ndarray:
         [target_df["user_id"].to_numpy(), target_buckets], names=["user_id", "_duration_bucket"]
     )
     return rates.reindex(target_keys).fillna(global_rate).to_numpy(dtype=np.float64)
+
+
+@feature("video_completion_ratio_hist")
+def video_completion_ratio_hist(train_df, target_df) -> np.ndarray:
+    """Duration-normalised, time-decayed historical completion per video.
+
+    This is the B10-fix's missing item-side counterpart to ``pcr_hist``. It
+    estimates how a candidate video performs relative to the median completion
+    of videos in its duration bucket, using only earlier fitting rows. The
+    output is keyed by ``video_id``, so different candidates for one user can
+    receive different values and the feature is not structurally metric-inert.
+
+    On the cross-frame path, duration medians and video statistics are fit on
+    ``train_df`` only; no target outcome or target ``play_time_ms`` is read.
+    On the training-matrix path, both duration medians and video statistics
+    are strictly prior by ``time_ms``, with same-time rows excluded.
+    """
+    if train_df is target_df:
+        return _in_sample_video_completion_ratio_hist(train_df)
+
+    _assert_historical_cutoff(train_df, target_df)
+    relative, _ = _duration_relative_completion(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("video_completion_ratio_hist requires valid training dates")
+    weights = decay_weights(dates, dates.max())
+    fitting_rows = pd.DataFrame(
+        {
+            "video_id": train_df["video_id"].to_numpy(),
+            "_weighted_relative": weights * relative,
+            "_weight": weights,
+        }
+    )
+    grouped = fitting_rows.groupby("video_id", sort=False)
+    weighted_relative = grouped["_weighted_relative"].sum()
+    effective_impressions = grouped["_weight"].sum()
+    global_rate = float(np.mean(relative))
+    rates = eb_smooth(weighted_relative, effective_impressions, global_rate)
+    return target_df["video_id"].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
 
 
 def _in_sample_duration_group_rate(train_df) -> np.ndarray:
