@@ -26,9 +26,12 @@ SUPPORTED_LOSSES: dict[str, frozenset[str]] = {
     "blend": frozenset({"pointwise"}),
 }
 
-# Registered in MODEL_REGISTRY but raises NotImplementedError on construction.
-# Rejecting it here turns a wasted smoke run into a cheap proposal re-ask.
-UNIMPLEMENTED_MODELS = frozenset({"deepfm_mtl"})
+# Registered in MODEL_REGISTRY but its constructor raises NotImplementedError.
+# Rejecting one here turns a wasted smoke run into a cheap proposal re-ask.
+# deepfm_mtl (C9) moved out of this set once its multi-task heads landed
+# (pipeline/models/deepfm.py::DeepFMMultiTask) -- kept as an empty set rather
+# than deleted so a future model stub has an obvious place to register.
+UNIMPLEMENTED_MODELS: frozenset[str] = frozenset()
 
 
 class Config(BaseModel):

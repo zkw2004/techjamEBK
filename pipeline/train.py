@@ -506,12 +506,39 @@ def _fit_and_predict(
     validation_users = (
         None if validation_frame is None else _column(validation_frame, "user_id")
     )
+
+    # C9: a model that declares AUX_TARGETS (DeepFMMultiTask) needs same-row
+    # auxiliary labels (is_click, is_like) that cannot travel through X/y --
+    # they are forbidden as input features and the frozen fit() signature has
+    # no slot for them. groups is already the one parameter models interpret
+    # per-model (LightGBM already accepts a bare tuple or a train/val dict),
+    # so this extends that precedent instead of adding a new one: every model
+    # that does not declare AUX_TARGETS gets the exact tuple it always did.
+    aux_columns = getattr(model, "AUX_TARGETS", None)
+    if aux_columns:
+        train_aux = {name: _column(train_frame, name) for name in aux_columns}
+        if config.get("negative_sampling", "all") != "all":
+            train_aux = {name: values[selected] for name, values in train_aux.items()}
+        validation_aux = (
+            None
+            if validation_frame is None
+            else {name: _column(validation_frame, name) for name in aux_columns}
+        )
+        groups = {
+            "train": train_users,
+            "val": validation_users,
+            "aux_train": train_aux,
+            "aux_val": validation_aux,
+        }
+    else:
+        groups = (train_users, validation_users)
+
     model.fit(
         train_matrix,
         train_labels,
         validation_matrix,
         validation_labels,
-        groups=(train_users, validation_users),
+        groups=groups,
     )
     if fit_summaries is not None:
         fit_summaries.append({"best_epoch": getattr(model, "best_epoch", None)})
