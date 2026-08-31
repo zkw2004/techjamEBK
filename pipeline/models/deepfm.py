@@ -7,69 +7,128 @@ import numpy as np
 from pipeline.models import register
 
 
-def _network(field_dims, emb_dim: int, mlp_dims, dropout: float):
-    """Build lazily so importing the registry does not initialise Torch."""
-    import torch
-    from torch import nn
+def _build_network(
+    field_dims,
+    emb_dim: int,
+    mlp_dims,
+    dropout: float,
+    *,
+    aux_heads=(),
+    lhuc: bool = False,
+    senet: bool = False,
+    senet_reduction: int = 4,
+    user_field_index: int | None = None,
+):
+    """Build lazily so importing the registry does not initialise Torch.
 
-    class Network(nn.Module):
-        def __init__(self, field_dims, emb_dim: int, mlp_dims, dropout: float):
-            super().__init__()
-            self.embeddings = nn.ModuleList([nn.Embedding(dim, emb_dim) for dim in field_dims])
-            self.linear = nn.ModuleList([nn.Embedding(dim, 1) for dim in field_dims])
-            self.bias = nn.Parameter(torch.zeros(1))
+    One class serves every combination of the optional blocks: auxiliary heads
+    (C9), LHUC/PPNet user gating (C11) and SENet field weighting (C12). They are
+    genuinely independent — each may be on or off without the others — so
+    enumerating them as separate network classes would mean eight near-identical
+    bodies, and the earlier two-factory split had already duplicated the primary
+    path once.
 
-            layers = []
-            input_dim = len(field_dims) * emb_dim
-            for hidden_dim in mlp_dims:
-                layers.extend([nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Dropout(dropout)])
-                input_dim = hidden_dim
-            layers.append(nn.Linear(input_dim, 1))
-            self.mlp = nn.Sequential(*layers)
+    **Construction order is load-bearing.** Embeddings, linear, bias and the MLP
+    are built first, in exactly the order the original single-task network built
+    them, so a fresh model given the same seed initialises the primary path's
+    parameters identically no matter which optional blocks exist. Matching
+    *parameters* is not sufficient by itself, though: constructing any
+    ``nn.Linear`` draws from torch's global RNG for its default init, which
+    advances the same stream ``nn.Dropout`` reads from during training — so even
+    with identical parameters, the first dropout mask drawn in training would
+    differ purely because an optional block existed. Every optional block is
+    therefore constructed inside an RNG save/restore, which undoes that draw's
+    effect on the shared stream. Together with none of the blocks carrying
+    dropout of their own (so *computing* them later costs no extra randomness
+    either), this is what lets a disabled block reproduce the plain network
+    exactly rather than approximately.
 
-        def forward(self, X):
-            embeddings = torch.stack(
-                [embedding(X[:, index]) for index, embedding in enumerate(self.embeddings)],
-                dim=1,
-            )
-            order_one = (
-                torch.stack(
-                    [linear(X[:, index]) for index, linear in enumerate(self.linear)],
-                    dim=0,
-                ).sum(dim=0)
-                + self.bias
-            )
-            order_two = DeepFMModel._second_order(embeddings)
-            deep = self.mlp(embeddings.flatten(start_dim=1))
-            return (order_one + order_two + deep).squeeze(1)
-
-
-    return Network(field_dims, emb_dim, mlp_dims, dropout)
-
-
-def _multitask_network(field_dims, emb_dim: int, mlp_dims, dropout: float, aux_heads):
-    """The single-task network plus a linear probe per auxiliary target.
-
-    Construction order matters: embeddings, linear, bias and the MLP are built
-    in exactly the order ``_network`` builds them, so a fresh model given the
-    same seed initialises the primary path's parameters identically whether or
-    not auxiliary heads exist. Matching *parameters* is not sufficient by
-    itself, though: constructing the aux heads' ``nn.Linear`` layers draws
-    from torch's global RNG for their default init, which advances the same
-    stream ``nn.Dropout`` reads from during training — so even with identical
-    parameters, the first dropout mask drawn in training would differ purely
-    because the aux heads existed. The save/restore around their construction
-    below undoes that draw's effect on the shared stream, so training sees
-    the exact same RNG position it would in the single-task network. Together
-    with the aux heads carrying no dropout of their own (so *computing* them
-    later costs no extra randomness either), this is what lets aux weights of
-    0 reproduce the single-task model exactly rather than approximately.
+    ``forward`` returns a bare tensor when there are no auxiliary heads and a
+    ``(primary, aux_dict)`` pair when there are — matching what each caller
+    already expects.
     """
     import torch
     from torch import nn
 
-    class MultiTaskNetwork(nn.Module):
-        def __init__(self, field_dims, emb_dim: int, mlp_dims, dropout: float, aux_heads):
+    class SENetBlock(nn.Module):
+        """FiBiNET squeeze-and-excitation over fields (C12).
+
+        Squeeze each field's embedding to a scalar by mean-pooling, learn a
+        per-field weight from the resulting field vector, and rescale. The point
+        on this task is that the weights are computed *per row*, so the same
+        field can matter for one user's candidates and not another's — which is
+        the only kind of signal a within-user metric can see (5.4).
+
+        Initialised to the identity: the final excitation layer has zero weight
+        and zero bias, and ``2 * sigmoid(0) == 1``, so it emits exactly 1.0 for
+        every field before any training step. That makes ``senet=True`` at
+        initialisation indistinguishable from ``senet=False``, so an A/B between
+        them measures the mechanism rather than a different random starting
+        point. Zeroing the last layer costs nothing in trainability — its own
+        gradient is non-zero, so it leaves zero after the first step, the same
+        trick ResNet's zero-init residual and LoRA's zero-init B matrix rely on.
+
+        Two deviations from the FiBiNET paper, both forced by this task's field
+        count. The paper squeezes through a ReLU bottleneck of ``n_fields /
+        r``; with the five official fields and the usual r that is a *single*
+        unit, and a single ReLU that happens to sit negative emits zero for
+        every row — collapsing the excitation to its bias, i.e. one constant
+        weight per field. A per-field constant is absorbed into the embedding
+        table and is invisible to a within-user metric (5.4), so the block would
+        silently become a no-op that still reported itself as active. Hence a
+        floor of two hidden units, and ``2 * sigmoid`` rather than ReLU on the
+        output: sigmoid has no dead region, so a weight can shrink toward zero
+        without the row losing its gradient, and the gate lands on the same
+        (0, 2)-around-identity scale LHUC uses.
+        """
+
+        def __init__(self, n_fields: int, reduction: int):
+            super().__init__()
+            hidden = max(2, n_fields // reduction)
+            self.squeeze = nn.Linear(n_fields, hidden)
+            self.excite = nn.Linear(hidden, n_fields)
+            nn.init.zeros_(self.excite.weight)
+            nn.init.zeros_(self.excite.bias)
+
+        def forward(self, embeddings):
+            hidden = torch.relu(self.squeeze(embeddings.mean(dim=2)))
+            weights = 2.0 * torch.sigmoid(self.excite(hidden))
+            return embeddings * weights.unsqueeze(-1)
+
+    class LHUCGate(nn.Module):
+        """PPNet-style user-conditioned modulation of the MLP's hidden units (C11).
+
+        Projects the user's own embedding to one multiplicative gate per hidden
+        unit of every MLP layer, squashed through ``2 * sigmoid`` so a gate spans
+        (0, 2) and is exactly 1.0 — the identity — when the projection outputs
+        zero. Both weight and bias start at zero, so like SENet above this begins
+        as an exact no-op and diverges only as it learns.
+
+        The projection reads a *detached* user embedding, following PPNet: the
+        gate is conditioned on who the user is, but gradients from the gate do
+        not reshape the shared embedding table itself. Without the stop-gradient
+        the gate and the embedding chase each other, and the embedding stops
+        being a clean representation of the user for the rest of the network.
+
+        Parameterising the gate on the embedding rather than on a per-user table
+        also keeps this small (``emb_dim x sum(mlp_dims)`` parameters, not
+        ``n_users x sum(mlp_dims)``) and lets it produce a sensible gate for a
+        user held out of training.
+        """
+
+        def __init__(self, emb_dim: int, mlp_dims):
+            super().__init__()
+            self.splits = [int(size) for size in mlp_dims]
+            self.project = nn.Linear(emb_dim, sum(self.splits))
+            nn.init.zeros_(self.project.weight)
+            nn.init.zeros_(self.project.bias)
+
+        def forward(self, user_embedding):
+            gates = 2.0 * torch.sigmoid(self.project(user_embedding))
+            return torch.split(gates, self.splits, dim=1)
+
+    class Network(nn.Module):
+        def __init__(self):
             super().__init__()
             self.embeddings = nn.ModuleList([nn.Embedding(dim, emb_dim) for dim in field_dims])
             self.linear = nn.ModuleList([nn.Embedding(dim, 1) for dim in field_dims])
@@ -83,20 +142,38 @@ def _multitask_network(field_dims, emb_dim: int, mlp_dims, dropout: float, aux_h
             layers.append(nn.Linear(input_dim, 1))
             self.mlp = nn.Sequential(*layers)
 
-            # Quarantined: nn.Linear.reset_parameters() always draws its
-            # default init from torch's global generator, with no hook to
-            # give it an isolated one. Snapshotting and restoring the global
-            # RNG state around construction is what keeps that draw from
-            # shifting the position every later nn.Dropout call reads from.
+            self.user_field_index = user_field_index
+            # Everything below is optional and therefore quarantined -- see the
+            # construction-order note in this function's docstring.
             embed_total = len(field_dims) * emb_dim
             rng_state = torch.get_rng_state()
-            self.aux_heads = nn.ModuleDict(
-                {name: nn.Linear(embed_total, 1) for name in aux_heads}
-            )
-            torch.set_rng_state(rng_state)
+            try:
+                self.senet = SENetBlock(len(field_dims), senet_reduction) if senet else None
+                self.lhuc = LHUCGate(emb_dim, mlp_dims) if lhuc else None
+                self.aux_heads = nn.ModuleDict(
+                    {name: nn.Linear(embed_total, 1) for name in aux_heads}
+                )
+            finally:
+                torch.set_rng_state(rng_state)
+
+        def _deep(self, flat, gates):
+            """The MLP, optionally gated after each hidden block.
+
+            Gates are applied to each hidden block's output -- that is, after its
+            dropout -- so what the next layer receives is exactly what was scaled.
+            """
+            if gates is None:
+                return self.mlp(flat)
+            index = 0
+            for layer in self.mlp:
+                flat = layer(flat)
+                if isinstance(layer, nn.Dropout):
+                    flat = flat * gates[index]
+                    index += 1
+            return flat
 
         def forward(self, X):
-            embeddings = torch.stack(
+            raw = torch.stack(
                 [embedding(X[:, index]) for index, embedding in enumerate(self.embeddings)],
                 dim=1,
             )
@@ -107,14 +184,36 @@ def _multitask_network(field_dims, emb_dim: int, mlp_dims, dropout: float, aux_h
                 ).sum(dim=0)
                 + self.bias
             )
+            # SENet reweights the embeddings feeding *both* the second-order term
+            # and the MLP ("before the FM/DeepFM interaction layer"). The
+            # first-order term reads its own separate weight table and is left
+            # alone, as in FiBiNET.
+            embeddings = raw if self.senet is None else self.senet(raw)
             order_two = DeepFMModel._second_order(embeddings)
             flat = embeddings.flatten(start_dim=1)
-            deep = self.mlp(flat)
-            primary = (order_one + order_two + deep).squeeze(1)
-            aux = {name: head(flat).squeeze(1) for name, head in self.aux_heads.items()}
-            return primary, aux
+            gates = None
+            if self.lhuc is not None:
+                # Read the user embedding before SENet touched it, so the gate is
+                # conditioned on the user rather than on the other block's output.
+                gates = self.lhuc(raw[:, self.user_field_index, :].detach())
+            primary = (order_one + order_two + self._deep(flat, gates)).squeeze(1)
+            if not self.aux_heads:
+                return primary
+            return primary, {name: head(flat).squeeze(1) for name, head in self.aux_heads.items()}
 
-    return MultiTaskNetwork(field_dims, emb_dim, mlp_dims, dropout, aux_heads)
+    return Network()
+
+
+def _network(field_dims, emb_dim: int, mlp_dims, dropout: float, **blocks):
+    """The single-task network: one score per row, no auxiliary heads."""
+    return _build_network(field_dims, emb_dim, mlp_dims, dropout, **blocks)
+
+
+def _multitask_network(field_dims, emb_dim: int, mlp_dims, dropout: float, aux_heads, **blocks):
+    """The single-task network plus a linear probe per auxiliary target."""
+    return _build_network(
+        field_dims, emb_dim, mlp_dims, dropout, aux_heads=aux_heads, **blocks
+    )
 
 
 @register("deepfm")
@@ -134,6 +233,9 @@ class DeepFMModel:
         seed: int = 42,
         feature_names: list[str] | None = None,
         num_threads: int = 1,
+        lhuc: bool = False,
+        senet: bool = False,
+        senet_reduction: int = 4,
         **hparams,
     ):
         if emb_dim <= 0 or lr <= 0 or l2 < 0:
@@ -144,6 +246,14 @@ class DeepFMModel:
             raise ValueError("mlp must contain positive hidden dimensions")
         if not 0 <= dropout < 1:
             raise ValueError("dropout must be in [0, 1)")
+        if int(senet_reduction) < 1:
+            raise ValueError("senet_reduction must be a positive integer")
+        # C11/C12: both default off, so every existing config keeps the exact
+        # network it had. See _build_network for why "off" is bit-exact and not
+        # merely close.
+        self.lhuc = bool(lhuc)
+        self.senet = bool(senet)
+        self.senet_reduction = int(senet_reduction)
         self.emb_dim = emb_dim
         self.mlp_dims = tuple(int(size) for size in mlp)
         self.dropout = dropout
@@ -195,6 +305,7 @@ class DeepFMModel:
             self.emb_dim,
             self.mlp_dims,
             self.dropout,
+            **self._block_kwargs(),
         )
         optimiser = torch.optim.Adam(self.network.parameters(), lr=self.lr, weight_decay=self.l2)
         loss_fn = nn.BCEWithLogitsLoss()
@@ -253,6 +364,31 @@ class DeepFMModel:
         if not outputs:
             return np.array([], dtype=np.float32)
         return torch.cat(outputs).numpy()
+
+    def _block_kwargs(self) -> dict:
+        """Optional-block arguments for ``_build_network``, validated.
+
+        LHUC gates on the user's own embedding, so it needs to know which field
+        that is. Raising here rather than silently disabling matters: a
+        `lhuc: true` hparam that quietly did nothing would produce a node whose
+        config claims a mechanism its score never had -- the same silent-no-op
+        failure that cost a run eleven iterations of identical FM variants
+        (agent/schema.py, SUPPORTED_LOSSES).
+        """
+        user_field_index = None
+        if self.lhuc:
+            if "user_id" not in self.feature_names:
+                raise ValueError(
+                    "lhuc=True gates on the user embedding and so requires a "
+                    f"'user_id' field; got features {self.feature_names!r}"
+                )
+            user_field_index = self.feature_names.index("user_id")
+        return {
+            "lhuc": self.lhuc,
+            "senet": self.senet,
+            "senet_reduction": self.senet_reduction,
+            "user_field_index": user_field_index,
+        }
 
     @staticmethod
     def _second_order(embeddings):
@@ -411,6 +547,7 @@ class DeepFMMultiTask(DeepFMModel):
         torch.manual_seed(self.seed)
         self.network = _multitask_network(
             self.field_dims, self.emb_dim, self.mlp_dims, self.dropout, self.AUX_TARGETS,
+            **self._block_kwargs(),
         )
         optimiser = torch.optim.Adam(self.network.parameters(), lr=self.lr, weight_decay=self.l2)
         loss_fn = nn.BCEWithLogitsLoss()

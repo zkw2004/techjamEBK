@@ -356,6 +356,230 @@ def test_c9_config_schema_accepts_deepfm_mtl():
     assert config.model == "deepfm_mtl"
 
 
+# --- C11 LHUC / C12 SENet -----------------------------------------------
+
+_MTL_FIELDS = ["user_id", "video_id", "author_id", "tab", "dur_bucket"]
+
+_BLOCK_KWARGS = dict(emb_dim=8, mlp=(16, 8), dropout=0.2, lr=0.02, max_epochs=3,
+                     batch_size=16, patience=1, seed=11)
+
+
+def _fit_deepfm(X, y, users, **overrides):
+    model = DeepFMModel(feature_names=list(_MTL_FIELDS), **{**_BLOCK_KWARGS, **overrides})
+    model.fit(X, y, None, None, groups=(users, None))
+    return model
+
+
+@pytest.mark.parametrize("block", ["lhuc", "senet"])
+def test_c11_c12_disabled_block_reproduces_plain_deepfm_exactly(block):
+    """A block that is off must leave the network bit-identical, not merely
+    close. Constructing any nn.Linear draws from torch's global RNG -- the same
+    stream nn.Dropout reads during training -- so an unguarded implementation
+    would shift every dropout mask purely because the block's code existed,
+    even with the block switched off. This is the C9 lesson applied to C11/C12;
+    _build_network's RNG save/restore is what this validates the effect of."""
+    X, y, _click, _like, users = _mtl_rows()
+
+    plain = _fit_deepfm(X, y, users)
+    off = _fit_deepfm(X, y, users, **{block: False})
+
+    np.testing.assert_array_equal(plain.predict(X), off.predict(X))
+
+
+@pytest.mark.parametrize("block", ["lhuc", "senet"])
+def test_c11_c12_enabled_block_is_the_identity_before_training(block):
+    """Both blocks initialise to an exact no-op -- LHUC's 2*sigmoid(0) and
+    SENet's zero-initialised excitation both emit exactly 1.0. So before any
+    training step, on and off must produce the same scores.
+
+    This is what makes an A/B between them a measurement of the *mechanism*: if
+    the blocks started at a random transform instead, an observed delta would be
+    confounded with simply having perturbed the starting point. Asserted on
+    freshly built networks rather than through fit(), because the constructor
+    (rightly) rejects the lr=0 that freezing training would otherwise need."""
+    import torch
+
+    from pipeline.models.deepfm import _build_network
+
+    field_dims = [6, 6, 4, 2, 4]
+    common = dict(emb_dim=8, mlp_dims=(16, 8), dropout=0.0, user_field_index=0)
+    batch = torch.zeros(4, len(field_dims), dtype=torch.long)
+    batch[1:, 0] = torch.arange(1, 4)
+
+    torch.manual_seed(11)
+    off = _build_network(field_dims, **common)
+    torch.manual_seed(11)
+    on = _build_network(field_dims, **{**common, block: True})
+
+    off.eval()
+    on.eval()
+    with torch.no_grad():
+        torch.testing.assert_close(off(batch), on(batch), rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("block", ["lhuc", "senet"])
+def test_c11_c12_enabled_block_measurably_changes_training(block):
+    """The inverse guard. Without it the two tests above would both pass on an
+    implementation that wired the blocks up to nothing at all."""
+    X, y, _click, _like, users = _mtl_rows()
+
+    off = _fit_deepfm(X, y, users)
+    on = _fit_deepfm(X, y, users, **{block: True})
+
+    assert not np.allclose(off.predict(X), on.predict(X))
+
+
+def test_c11_lhuc_gate_is_user_conditioned():
+    """The mechanism's whole claim: two users with otherwise identical rows get
+    different hidden-unit scaling. Asserted on the gate directly, because at the
+    score level a difference could equally come from the user embedding already
+    feeding the MLP."""
+    import torch
+
+    X, y, _click, _like, users = _mtl_rows()
+    model = _fit_deepfm(X, y, users, lhuc=True)
+
+    encoded = torch.as_tensor(model._encode(X), dtype=torch.long)
+    with torch.no_grad():
+        embedded = torch.stack(
+            [embedding(encoded[:, i]) for i, embedding in enumerate(model.network.embeddings)],
+            dim=1,
+        )
+        gates = model.network.lhuc(embedded[:, model.network.user_field_index, :])
+
+    first_layer = gates[0]
+    assert not torch.allclose(first_layer[0], first_layer[-1])
+    # 2*sigmoid bounds every gate to (0, 2), centred on the identity.
+    assert float(first_layer.min()) > 0.0 and float(first_layer.max()) < 2.0
+
+
+def test_c11_lhuc_produces_one_gate_group_per_hidden_layer():
+    X, y, _click, _like, users = _mtl_rows()
+    model = _fit_deepfm(X, y, users, lhuc=True)
+
+    import torch
+
+    with torch.no_grad():
+        gates = model.network.lhuc(torch.zeros(3, model.emb_dim))
+
+    assert [tuple(gate.shape) for gate in gates] == [(3, 16), (3, 8)]
+
+
+def test_c11_lhuc_does_not_backpropagate_into_the_shared_embedding():
+    """PPNet's stop-gradient. The gate is conditioned on the user embedding but
+    must not reshape it, or the gate and the embedding chase each other and the
+    embedding stops being a clean user representation for the rest of the net.
+
+    Asserted with a forward hook on the real network, capturing what
+    Network.forward actually hands the gate -- detaching inside the test instead
+    would only prove the test detaches."""
+    import torch
+
+    X, y, _click, _like, users = _mtl_rows()
+    network = _fit_deepfm(X, y, users, lhuc=True).network
+    captured = {}
+    handle = network.lhuc.register_forward_pre_hook(
+        lambda _module, args: captured.setdefault("input", args[0])
+    )
+    try:
+        network.eval()
+        network(torch.zeros(2, len(network.embeddings), dtype=torch.long))
+    finally:
+        handle.remove()
+
+    assert captured["input"].requires_grad is False
+
+
+def test_c11_lhuc_requires_a_user_id_field():
+    """Silently disabling would produce a node whose config claims a mechanism
+    its score never had."""
+    X = np.asarray([["v1", "a1"], ["v2", "a2"]], dtype=object)
+    y = np.asarray([1.0, 0.0])
+    model = DeepFMModel(feature_names=["video_id", "author_id"], lhuc=True,
+                        **{**_BLOCK_KWARGS, "batch_size": 2})
+
+    with pytest.raises(ValueError, match="requires a 'user_id' field"):
+        model.fit(X, y, None, None, groups=(np.array(["u1", "u2"]), None))
+
+
+def test_c12_senet_reweights_fields_per_row():
+    """SENet's weights must vary across rows, not just across fields: a
+    per-field constant would be absorbed into the embedding table and could not
+    help a within-user comparison (AGENT_PLAN 5.4)."""
+    import torch
+
+    X, y, _click, _like, users = _mtl_rows()
+    model = _fit_deepfm(X, y, users, senet=True)
+
+    encoded = torch.as_tensor(model._encode(X), dtype=torch.long)
+    with torch.no_grad():
+        embedded = torch.stack(
+            [embedding(encoded[:, i]) for i, embedding in enumerate(model.network.embeddings)],
+            dim=1,
+        )
+        reweighted = model.network.senet(embedded)
+        weights = (reweighted / embedded)[:, :, 0]
+
+    assert weights.shape == (len(X), len(model.field_dims))
+    assert not torch.allclose(weights[0], weights[-1])
+
+
+def test_c12_rejects_a_non_positive_senet_reduction():
+    with pytest.raises(ValueError, match="senet_reduction must be a positive integer"):
+        DeepFMModel(senet=True, senet_reduction=0)
+
+
+def test_c11_c12_compose_and_stay_deterministic():
+    """They are independent mechanisms and must be usable together; determinism
+    under a fixed seed is the C1 same-seed guarantee every model owes."""
+    X, y, _click, _like, users = _mtl_rows()
+
+    def fit_once():
+        return _fit_deepfm(X, y, users, lhuc=True, senet=True).predict(X)
+
+    both = fit_once()
+    np.testing.assert_array_equal(both, fit_once())
+    assert np.isfinite(both).all()
+    assert not np.allclose(both, _fit_deepfm(X, y, users).predict(X))
+
+
+def test_c11_c12_reach_the_multitask_model_too():
+    """deepfm_mtl inherits __init__, so the hparams are accepted there. If they
+    were not also wired into its network they would be silently ignored -- a
+    config claiming a mechanism it never had."""
+    from pipeline.models.deepfm import DeepFMMultiTask
+
+    X, y, click, like, users = _mtl_rows()
+
+    def fit_once(**blocks):
+        model = DeepFMMultiTask(aux_click_weight=0.3, aux_like_weight=0.2,
+                                feature_names=list(_MTL_FIELDS),
+                                **{**_BLOCK_KWARGS, **blocks})
+        model.fit(X, y, None, None, groups=_mtl_groups(users, click, like))
+        return model.predict(X)
+
+    plain = fit_once()
+    np.testing.assert_array_equal(plain, fit_once(lhuc=False, senet=False))
+    assert not np.allclose(plain, fit_once(lhuc=True))
+    assert not np.allclose(plain, fit_once(senet=True))
+
+
+def test_c11_c12_run_through_run_experiment_end_to_end():
+    """The full pipeline.train.run_experiment path, not the model in isolation:
+    proves the hparams survive Config validation and _matrix construction."""
+    from pipeline.train import run_experiment
+
+    result = run_experiment(
+        {"model": "deepfm", "features": ["user_id", "video_id", "author_id", "tab"],
+         "hparams": {"emb_dim": 4, "mlp": [8], "max_epochs": 1, "batch_size": 64,
+                     "lhuc": True, "senet": True}},
+        fidelity="smoke",
+        seed=0,
+    )
+
+    assert result["status"] == "ok"
+
+
 def test_c9_real_run_experiment_smoke_completes_end_to_end():
     """The full pipeline.train.run_experiment integration, not just the model
     class in isolation — proves the AUX_TARGETS plumbing survives negative

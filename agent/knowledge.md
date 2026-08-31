@@ -42,10 +42,22 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 - **LightGBM lambdarank** — Use per-user groups so the objective optimises
   within-user ranking; without the correct group array it does not match GAUC
   or nDCG and the result is invalid.
-- **Multi-task heads** — Predicting legal auxiliary feedback signals as
-  training targets to enrich shared embeddings is a promising direction in
-  principle, but `deepfm_mtl` is **not implemented** in this codebase and is
-  rejected before it runs. Do not propose it.
+- **Multi-task heads** — Predict legal auxiliary feedback signals as extra
+  training targets so the shared embeddings have to explain more than one
+  behaviour. Implemented as `deepfm_mtl` with `is_click`/`is_like` heads and
+  tunable `aux_click_weight`/`aux_like_weight`; only the `long_view` head is
+  scored. Weights of 0 reproduce plain `deepfm` exactly, so the weights are the
+  experiment.
+- **LHUC / PPNet gating** — Set `hparams: {"lhuc": true}` on `deepfm` or
+  `deepfm_mtl` to scale every MLP hidden unit by a gate learned from the row's
+  own user embedding. Worth trying because the metric only ever compares items
+  *within* one user, so a mechanism that lets the same feature count differently
+  for different users is aimed at the right target. Requires `user_id` in
+  `features`.
+- **SENet field weighting** — Set `hparams: {"senet": true}` to learn per-row,
+  per-field importance weights over the embeddings before the interaction term.
+  Same motivation as LHUC and composable with it; both default off and are
+  exactly the identity at initialisation, so turning one on is a clean A/B.
 - **BPR / pairwise** — Compare a positive impression with sampled negatives
   from the same user's eligible history when a ranking-aligned objective may
   outperform pointwise BCE. Implemented for `fm` only (`loss="pairwise"`);
