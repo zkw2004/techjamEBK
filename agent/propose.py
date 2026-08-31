@@ -22,6 +22,7 @@ Design notes:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,49 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 KNOWLEDGE_PATH = Path(__file__).parent / "knowledge.md"
 
 _client: Any | None = None
+
+CITATION_RE = re.compile(r"\[ref:\s*([^\]]*[A-Za-z0-9][^\]]*)\]")
+
+# A12 is deliberately self-contained: no prompt/idea_bank.md file and no
+# `references` field on Action. The proposer sees this list in the ordinary
+# prompt context and must copy one relevant citation into `hypothesis`.
+IDEA_BANK = (
+    {
+        "idea": "Duration-quantile grouping / duration-normalized engagement features",
+        "reference": "D2Q — Zhan et al., KDD 2022",
+        "why": "Duration confounds watch-time labels; duration-aware grouping controls it.",
+    },
+    {
+        "idea": "Historical play-completion-ratio aggregates",
+        "reference": "PCR/CWM — Zhao et al., KDD 2024",
+        "why": "Completion behaviour can predict long-view beyond raw impression counts.",
+    },
+    {
+        "idea": "Auxiliary-signal historical rates",
+        "reference": "ESMM-style multi-feedback usage",
+        "why": "Unscored feedback signals can densify sparse ranking labels through history.",
+    },
+    {
+        "idea": "Within-user pairwise / listwise objectives",
+        "reference": "BPR — Rendle 2009; LambdaRank",
+        "why": "Pair/listwise losses match per-user GAUC and nDCG@5 better than global BCE.",
+    },
+    {
+        "idea": "Multi-task shared-embedding heads",
+        "reference": "ESMM / shared-bottom MTL",
+        "why": "Shared representations can borrow signal across feedback tasks.",
+    },
+    {
+        "idea": "Ablation-guided component targeting",
+        "reference": "MLE-STAR — Yoon & Nam, NeurIPS 2025",
+        "why": "Use evidence from ablations to choose the next component to improve.",
+    },
+    {
+        "idea": "Tree search over solutions, branch from global best",
+        "reference": "AIDE — Jiang et al., 2025",
+        "why": "The agent loop searches a tree of solution variants rather than one line.",
+    },
+)
 
 
 class ProposeError(RuntimeError):
@@ -90,6 +134,25 @@ def load_prompt(name: str) -> str:
 
 def load_knowledge() -> str:
     return KNOWLEDGE_PATH.read_text()
+
+
+def citations_in_hypothesis(hypothesis: str) -> list[str]:
+    """Return populated `[ref: ...]` tags embedded in a hypothesis string."""
+    return [match.strip() for match in CITATION_RE.findall(hypothesis)]
+
+
+def _without_citations(hypothesis: str) -> str:
+    """Normalise a hypothesis for retry identity checks."""
+    return " ".join(CITATION_RE.sub("", hypothesis).split())
+
+
+def check_action_citation(action: Action) -> None:
+    """A12: new proposals cite a published method without changing the schema."""
+    if not citations_in_hypothesis(action.hypothesis):
+        raise ProposeError(
+            "hypothesis must include one populated citation tag like "
+            "[ref: AIDE — Jiang et al., 2025]"
+        )
 
 
 def _usage(response: Any, model: str) -> dict:
@@ -271,6 +334,9 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
         "families_covered": _families_covered(history),
         "eligible_blend_parents": eligible_blend_parents(history),
         "available_features": available_features(),
+        "idea_bank": list(IDEA_BANK),
+        "citation_format": "append one citation to hypothesis as [ref: ...]; "
+        "do not add a references field",
         "baseline_to_beat": BASELINE_VALIDATION_PRIMARY,
         "min_meaningful_delta": MIN_DELTA_FLOOR,
         "history": summarise_history(history),
@@ -312,7 +378,9 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
         if action is None:
             last_error = "response did not contain a parseable Action"
             continue
-        if rejected_action is not None and action.hypothesis != rejected_action.hypothesis:
+        if rejected_action is not None and _without_citations(
+            action.hypothesis
+        ) != _without_citations(rejected_action.hypothesis):
             last_error = (
                 "corrected Action changed the hypothesis from "
                 f"{rejected_action.hypothesis!r} to {action.hypothesis!r}"
@@ -320,6 +388,7 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
             continue
         try:
             check_action_consistency(action)
+            check_action_citation(action)
         except ProposeError as exc:
             last_error = str(exc)
             rejected_action = action

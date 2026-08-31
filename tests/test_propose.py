@@ -18,7 +18,10 @@ from agent import propose as P
 from agent.schema import Action
 
 VALID_ACTION = Action(
-    hypothesis="lambdarank should beat pointwise BCE since GAUC is per-user",
+    hypothesis=(
+        "lambdarank should beat pointwise BCE since GAUC is per-user "
+        "[ref: BPR - Rendle 2009; LambdaRank]"
+    ),
     reasoning="n009 plateaued on fold 3",
     type="config",
     family="objective",
@@ -212,6 +215,14 @@ def test_valid_action_passes_consistency():
     P.check_action_consistency(VALID_ACTION)  # must not raise
 
 
+def test_a12_citation_is_embedded_in_hypothesis_not_schema():
+    assert P.citations_in_hypothesis(VALID_ACTION.hypothesis) == [
+        "BPR - Rendle 2009; LambdaRank"
+    ]
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        Action.model_validate({**VALID_ACTION.model_dump(), "references": ["AIDE"]})
+
+
 # --- retry behaviour --------------------------------------------------------
 
 def test_inconsistent_proposal_is_re_asked_once_then_succeeds():
@@ -223,6 +234,20 @@ def test_inconsistent_proposal_is_re_asked_once_then_succeeds():
     assert len(client.messages.calls) == 2
     assert "search_space" in client.messages.calls[1]["messages"][0]["content"]
     assert bad.hypothesis in client.messages.calls[1]["messages"][0]["content"]
+
+
+def test_uncited_proposal_is_re_asked_and_may_add_only_a_citation():
+    bad = VALID_ACTION.model_copy(
+        update={"hypothesis": "lambdarank should beat pointwise BCE since GAUC is per-user"}
+    )
+    corrected = VALID_ACTION
+    client = fake([(bad, USAGE), (corrected, USAGE)])
+
+    action, _ = P.propose(HISTORY, "knowledge", PARENT)
+
+    assert action is corrected
+    assert len(client.messages.calls) == 2
+    assert "[ref:" in client.messages.calls[1]["messages"][0]["content"]
 
 
 def test_retry_usage_is_summed_not_overwritten():
@@ -293,6 +318,8 @@ def test_prompts_load_and_carry_the_corrected_label():
     A prompt with the wrong label would steer every proposal wrong."""
     propose_md = P.load_prompt("propose")
     assert "long_view" in propose_md
+    assert "[ref:" in propose_md
+    assert "references" in propose_md
     assert "0.8645" in propose_md, "oracle ceiling must be stated"
     assert "0.0008" in propose_md, "noise floor must be stated"
 
@@ -303,6 +330,16 @@ def test_repair_prompt_forbids_changing_the_hypothesis():
 
 def test_knowledge_file_loads():
     assert "long_view" in P.load_knowledge()
+
+
+def test_idea_bank_is_self_contained_in_propose_context():
+    client = fake([(VALID_ACTION, USAGE)])
+    P.propose(HISTORY, "knowledge", PARENT)
+    context = json.loads(client.messages.calls[0]["messages"][0]["content"].split("\n\n", 1)[1])
+
+    assert "idea_bank" in context
+    assert any("AIDE" in row["reference"] for row in context["idea_bank"])
+    assert context["citation_format"].endswith("do not add a references field")
 
 
 # --- live-client construction ----------------------------------------------

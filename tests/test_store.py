@@ -210,3 +210,17 @@ def test_read_events_tolerates_a_truncated_final_line():
 
 def test_read_events_empty_before_any_append():
     assert store.read_events() == []
+
+
+def test_rendered_run_log_keeps_citation_next_to_hypothesis():
+    cited = make_node(
+        id="n001",
+        hypothesis=(
+            "lambdarank should improve per-user ranking "
+            "[ref: BPR - Rendle 2009; LambdaRank]"
+        ),
+    )
+    text = store.render_run_log([store.normalise(cited)])
+
+    assert "lambdarank should improve per-user ranking [ref: BPR - Rendle 2009;" in text
+    assert "n001 ok full cited:" in text
