@@ -8,6 +8,8 @@ no Docker (Section 12).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import multiprocessing as mp
 import os
 import sys
@@ -29,6 +31,107 @@ def _run_experiment(
     from pipeline.train import run_experiment
 
     return run_experiment(config, fidelity=fidelity, seed=seed, timeout_s=timeout_s)
+
+
+def _study_identity(config: dict, search_space: dict, budget: int) -> str:
+    """A study name that is stable across fidelity tiers but unique per action.
+
+    The loop runs one candidate through smoke -> screen -> full, so a tune
+    action reaches ``execute()`` three times. Optuna studies are resumable and
+    ``run_study``'s budget counts completed attempts, so a stable name makes
+    the later tiers reopen the finished study and return its result instead of
+    paying for the search again. Keyed on everything that defines the search,
+    so a genuinely different tune action never collides with this one.
+    """
+    payload = json.dumps(
+        {"config": config, "search_space": search_space, "budget": budget},
+        sort_keys=True,
+        default=str,
+    )
+    return "tune-" + hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def _run_tune_action(action: Action, config: dict, fidelity: str, timeout_s: int | float) -> dict:
+    """Search hyperparameters, then evaluate the winner at this fidelity.
+
+    Before this existed, ``type="tune"`` fell through to the ordinary
+    ``run_experiment`` call and ``action.search_space`` was ignored entirely —
+    a tuning node that had silently trained its parent's untouched config and
+    reported that as the tuning result. That is the same class of no-op
+    experiment the schema validator and the accept gate were both hardened
+    against, so the tune hedge in ``agent/schedule.py`` was disabled until
+    this landed.
+
+    Smoke deliberately does not search. A 20-trial study is minutes of folds;
+    smoke's contract is a seconds-long correctness check, and running the
+    study there would pay for it three times over and break the fidelity
+    ladder's whole purpose. At smoke the search space is validated and the
+    base config is run, which is exactly the "does this candidate execute at
+    all" question that tier asks.
+
+    The study itself evaluates on internal folds only (``pipeline.tune`` runs
+    its objective at screen fidelity), so tuning never consumes the official
+    validation window — trap 6.
+    """
+    from pipeline.tune import _suggest  # noqa: PLC0415 - keeps torch/optuna off the import path
+
+    search_space = action.search_space or {}
+    if not search_space:
+        raise ValueError("type='tune' requires a non-empty search_space")
+
+    if fidelity == "smoke":
+        # Validate every spec now, so a malformed search space is a cheap
+        # schema error here rather than a failure minutes into the study.
+        for name, spec in search_space.items():
+            _suggest(_SpecValidationTrial(), name, spec)
+        return _run_experiment(config, fidelity, action.config.seed, timeout_s)
+
+    from pipeline.tune import run_study  # noqa: PLC0415
+
+    study_name = _study_identity(config, search_space, action.budget)
+    study = run_study(
+        config,
+        search_space,
+        budget=action.budget,
+        seed=action.config.seed,
+        storage=f"sqlite:///logs/optuna/{study_name}.db",
+        study_name=study_name,
+    )
+    tuned = {**config, "hparams": {**config.get("hparams", {}), **study["best_params"]}}
+    result = _run_experiment(tuned, fidelity, action.config.seed, timeout_s)
+    # Carried onto the node so the ledger records what was actually searched
+    # and run, rather than the untuned config the Action arrived with.
+    result["tuned_config"] = tuned
+    result["tuning"] = {
+        "study": study_name,
+        "best_params": study["best_params"],
+        "best_value": study["best_value"],
+        "n_pruned": study["n_pruned"],
+        "n_trials": len(study["trials"]),
+        "pruning_savings_fraction": study["pruning_savings_fraction"],
+    }
+    return result
+
+
+class _SpecValidationTrial:
+    """Stands in for an Optuna trial so `_suggest` can validate a spec's shape.
+
+    `_suggest` raises on an unsupported spec before it ever calls the trial,
+    which is the check smoke needs; these methods exist only so a *valid* spec
+    completes without starting a study.
+    """
+
+    def suggest_categorical(self, name, choices):
+        del name
+        return choices[0]
+
+    def suggest_int(self, name, low, high):
+        del name, high
+        return low
+
+    def suggest_float(self, name, low, high, log=False):
+        del name, high, log
+        return low
 
 
 def _error_class(exc: BaseException) -> str:
@@ -110,7 +213,12 @@ def _node(
     indistinguishable from one that was never gated at all, which is exactly
     how the previous run accepted a below-baseline node.
     """
-    config = action.config.model_dump() if action.config is not None else {}
+    # A tune run reports the config it actually searched to, not the untuned
+    # one the Action carried in — a node recording the input config would
+    # describe an experiment that never ran.
+    config = result.get("tuned_config") or (
+        action.config.model_dump() if action.config is not None else {}
+    )
     node: dict[str, Any] = {
         "parent": action.parent,
         "family": action.family,
@@ -145,6 +253,8 @@ def _node(
                 ci_95=verdict.get("ci_95"),
                 delta_vs_best=verdict.get("delta_vs_best"),
             )
+        if result.get("tuning") is not None:
+            node["tuning"] = result["tuning"]
     else:
         node.update(
             metrics={},
@@ -341,6 +451,8 @@ def execute(
     try:
         if action.type == "code":
             result = _run_code_action(action, config, fidelity, timeout_s)
+        elif action.type == "tune":
+            result = _run_tune_action(action, config, fidelity, timeout_s)
         else:
             result = _run_experiment(config, fidelity, action.config.seed, timeout_s)
         if not isinstance(result, dict):

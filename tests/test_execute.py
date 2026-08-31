@@ -276,3 +276,137 @@ def test_accepted_defaults_to_false_without_an_accept_fn(monkeypatch):
     node = E.execute(_action(), fidelity="smoke", timeout_s=12)
 
     assert node["accepted"] is False
+
+
+# --- type="tune" dispatch to the Optuna harness ------------------------------
+
+def _tune_action(search_space=None, budget=4):
+    return Action(
+        hypothesis="the incumbent is undertuned rather than at its ceiling",
+        reasoning="fixture",
+        type="tune",
+        family="training",
+        parent="n004",
+        config={"model": "fm", "features": ["user_id", "video_id"],
+                "hparams": {"lr": 0.005, "k": 8}},
+        search_space={"lr": ["loguniform", 1e-4, 1e-2]} if search_space is None else search_space,
+        budget=budget,
+    )
+
+
+def _fake_study(best_params, calls=None):
+    def run_study(base_config, search_space, budget, seed, storage, study_name):
+        if calls is not None:
+            calls.append({"base_config": base_config, "search_space": search_space,
+                          "budget": budget, "seed": seed, "study_name": study_name})
+        return {"best_params": best_params, "best_value": 0.61, "n_pruned": 2,
+                "seconds_saved": 9.0, "measured_trial_seconds": 30.0,
+                "pruning_savings_fraction": 0.23, "trials": [{}, {}, {}, {}]}
+    return run_study
+
+
+def test_tune_runs_a_study_and_evaluates_the_tuned_config(monkeypatch):
+    """Regression: type='tune' used to fall through to the ordinary
+    run_experiment call with search_space ignored entirely — a tuning node
+    that had silently trained its parent's untouched config and reported that
+    as the tuning result."""
+    import pipeline.tune as tune_module
+
+    calls, ran = [], []
+    monkeypatch.setattr(tune_module, "run_study", _fake_study({"lr": 0.009}, calls))
+
+    def fake_run_experiment(config, fidelity, seed, timeout_s):
+        ran.append(config)
+        return _success(fidelity)
+
+    monkeypatch.setattr(E, "_run_experiment", fake_run_experiment)
+
+    node = E.execute(_tune_action(), fidelity="screen", timeout_s=60)
+
+    assert node["status"] == "ok"
+    assert len(calls) == 1, "the study must actually run"
+    # The winning params reach the evaluated config, merged over the base.
+    assert ran[0]["hparams"]["lr"] == 0.009
+    assert ran[0]["hparams"]["k"] == 8, "untouched base hparams must survive"
+
+
+def test_the_node_records_the_tuned_config_not_the_action_it_arrived_with(monkeypatch):
+    """A node showing the untuned hparams would describe an experiment that
+    never ran, which is the whole failure this dispatch exists to prevent."""
+    import pipeline.tune as tune_module
+
+    monkeypatch.setattr(tune_module, "run_study", _fake_study({"lr": 0.009}))
+    monkeypatch.setattr(E, "_run_experiment", lambda c, f, *_a, **_k: _success(f))
+
+    node = E.execute(_tune_action(), fidelity="screen", timeout_s=60)
+
+    assert node["config"]["hparams"]["lr"] == 0.009
+    assert node["tuning"]["best_params"] == {"lr": 0.009}
+    assert node["tuning"]["n_pruned"] == 2
+
+
+def test_smoke_validates_the_search_space_without_paying_for_a_study(monkeypatch):
+    """A 20-trial study is minutes of folds; smoke's contract is a seconds-long
+    correctness check, and the loop runs every candidate through smoke first."""
+    import pipeline.tune as tune_module
+
+    calls = []
+    monkeypatch.setattr(tune_module, "run_study", _fake_study({"lr": 0.009}, calls))
+    monkeypatch.setattr(E, "_run_experiment", lambda c, f, *_a, **_k: _success(f))
+
+    node = E.execute(_tune_action(), fidelity="smoke", timeout_s=60)
+
+    assert node["status"] == "ok"
+    assert calls == [], "smoke must not start a study"
+    assert node.get("tuning") is None
+
+
+@pytest.mark.parametrize(
+    "search_space",
+    [
+        {},
+        {"lr": ["unsupported-kind", 1e-4, 1e-2]},
+        {"lr": []},
+        {"k": ["categorical", []]},
+    ],
+)
+def test_a_malformed_search_space_fails_cheaply_at_smoke(search_space, monkeypatch):
+    monkeypatch.setattr(E, "_run_experiment", lambda c, f, *_a, **_k: _success(f))
+
+    node = E.execute(_tune_action(search_space=search_space), fidelity="smoke", timeout_s=60)
+
+    assert node["status"] == "error"
+    assert node["errors"][0]["error_class"] == "schema"
+
+
+def test_the_study_name_is_stable_across_tiers_but_unique_per_action(monkeypatch):
+    """The loop runs one candidate through smoke -> screen -> full, so a tune
+    action reaches execute() three times. Optuna studies are resumable and
+    budget-capped, so a stable name makes later tiers reopen the finished
+    study instead of paying for the search again."""
+    import pipeline.tune as tune_module
+
+    calls = []
+    monkeypatch.setattr(tune_module, "run_study", _fake_study({"lr": 0.009}, calls))
+    monkeypatch.setattr(E, "_run_experiment", lambda c, f, *_a, **_k: _success(f))
+
+    E.execute(_tune_action(), fidelity="screen", timeout_s=60)
+    E.execute(_tune_action(), fidelity="full", timeout_s=60)
+    E.execute(_tune_action(budget=99), fidelity="screen", timeout_s=60)
+
+    assert calls[0]["study_name"] == calls[1]["study_name"], "same action, same study"
+    assert calls[2]["study_name"] != calls[0]["study_name"], "different budget, different study"
+
+
+def test_a_config_action_is_untouched_by_the_tune_path(monkeypatch):
+    """Regression guard: only type='tune' may take the study path."""
+    import pipeline.tune as tune_module
+
+    calls = []
+    monkeypatch.setattr(tune_module, "run_study", _fake_study({"lr": 0.009}, calls))
+    monkeypatch.setattr(E, "_run_experiment", lambda c, f, *_a, **_k: _success(f))
+
+    node = E.execute(_action(), fidelity="screen", timeout_s=60)
+
+    assert calls == []
+    assert node.get("tuning") is None

@@ -87,10 +87,51 @@ def test_a_failing_hedge_is_not_excused_from_the_accounting():
     assert scheduler.strikes == 1
 
 
+def _first_feature_hedge(scheduler) -> Action:
+    """Skip past the tune hedge, which the queue offers first."""
+    for _ in range(5):
+        hedge = scheduler.next_hedge(INCUMBENT)
+        if hedge is not None and hedge.type == "config":
+            return hedge
+    raise AssertionError("no feature hedge was offered")
+
+
+def test_the_tune_hedge_is_offered_first_and_only_once():
+    """Ordered by probability of clearing the bar, not novelty: refining a
+    configuration already measured as good beats adding an untested signal.
+    Offered once — a second study over the same space would re-search ground
+    the first already covered."""
+    scheduler = schedule.Scheduler(baseline=BASELINE)
+
+    first = scheduler.next_hedge(INCUMBENT)
+    second = scheduler.next_hedge(INCUMBENT)
+
+    assert first.type == "tune"
+    assert first.search_space
+    assert first.budget == schedule.TUNE_BUDGET
+    assert first.parent == INCUMBENT["id"]
+    assert second.type == "config"
+
+
+def test_the_tune_hedge_is_enabled_now_that_execute_dispatches_it():
+    """Regression: this was deliberately off while execute() ignored
+    search_space for type='tune' and ran the config unchanged, which would
+    have written a node claiming to be a tuning run that silently re-ran its
+    parent. agent/execute.py::_run_tune_action is what lifted the block."""
+    assert schedule.TUNE_HEDGE_ENABLED is True
+
+    scheduler = schedule.Scheduler(baseline=BASELINE)
+    hedge = scheduler.next_hedge(INCUMBENT)
+
+    assert hedge.type == "tune"
+    # A tune Action with no search_space is exactly the no-op this guards.
+    assert hedge.search_space, "a tune hedge without a search space is a no-op experiment"
+
+
 def test_the_hedge_adds_one_untried_registered_feature_to_the_incumbent():
     scheduler = schedule.Scheduler(baseline=BASELINE)
 
-    hedge = scheduler.next_hedge(INCUMBENT)
+    hedge = _first_feature_hedge(scheduler)
 
     assert isinstance(hedge, Action)
     assert hedge.type == "config"
@@ -105,8 +146,8 @@ def test_the_hedge_adds_one_untried_registered_feature_to_the_incumbent():
 def test_successive_hedges_do_not_re_offer_the_same_feature():
     scheduler = schedule.Scheduler(baseline=BASELINE)
 
-    first = scheduler.next_hedge(INCUMBENT)
-    second = scheduler.next_hedge(INCUMBENT)
+    first = _first_feature_hedge(scheduler)
+    second = _first_feature_hedge(scheduler)
 
     assert set(first.config.features) != set(second.config.features)
 
@@ -117,7 +158,11 @@ def test_the_hedge_queue_runs_dry_rather_than_repeating_itself():
     from pipeline.features import FEATURES
 
     scheduler = schedule.Scheduler(baseline=BASELINE)
-    for _ in range(len(FEATURES)):
+    # One tune hedge, then one per registered feature the incumbent lacks.
+    unused = len(FEATURES) - len(
+        set(FEATURES) & set(INCUMBENT["config"]["features"])
+    )
+    for _ in range(unused + 1):
         assert scheduler.next_hedge(INCUMBENT) is not None
 
     assert scheduler.next_hedge(INCUMBENT) is None
@@ -137,23 +182,11 @@ def test_the_hedge_cites_the_ablation_evidence_that_motivated_it():
         "components": [{"component": "feature:video_ctr", "sensitivity": 0.11, "delta": -0.11}],
     }
 
+    scheduler.next_hedge(INCUMBENT, ablation)  # the tune hedge, offered first
     hedge = scheduler.next_hedge(INCUMBENT, ablation)
 
     assert "feature:video_ctr" in hedge.hypothesis
     assert INCUMBENT["id"] in hedge.hypothesis
-
-
-def test_tune_hedges_stay_off_until_execute_dispatches_them():
-    """execute() ignores search_space for type='tune' and runs the config as
-    is. Emitting a tune hedge before that dispatch lands would write a node
-    claiming to be a tuning run that had silently re-run its parent — the
-    no-op-experiment failure this project has already been bitten by once."""
-    assert schedule.TUNE_HEDGE_ENABLED is False
-
-    scheduler = schedule.Scheduler(baseline=BASELINE)
-    hedges = [scheduler.next_hedge(INCUMBENT) for _ in range(3)]
-
-    assert all(hedge.type == "config" for hedge in hedges if hedge is not None)
 
 
 def test_iteration_event_carries_the_strike_counter():
