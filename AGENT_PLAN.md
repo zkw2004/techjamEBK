@@ -435,7 +435,7 @@ The agent proposes a *space*, never a value. Sensible starting bounds, ordered b
 | `emb_dim` | {8, 16, 32, 64} | Largest single lever |
 | `l2` on embeddings | 1e-6 to 1e-3, log | Sparse ID embeddings overfit viciously |
 | `lr` (Adam) | 1e-4 to 1e-2, log | |
-| `epochs` | 1 to 5, early stop patience 1 | **CTR models at this scale usually peak after 1 to 3 epochs then degrade** |
+| `epochs` | up to ~40, early stop patience 1 | ~~CTR models at this scale usually peak after 1 to 3 epochs then degrade~~ — **measured false here (trap 11):** DeepFM converges at 35–41 epochs on this split, and a cap of 3 cost ~0.019 primary per fold. Let early stopping decide; the cap exists to bound runtime, not to encode a prior |
 | `batch_size` | {1024, 2048, 4096, 8192} | |
 | `mlp_dims` | [256,128,64] and variants | |
 | `dropout` | 0.0 to 0.5 | |
@@ -996,7 +996,7 @@ Ranked by severity. **Mandatory reading for all four.**
 
 10. **Majority voting for ensembling.** Produces labels, labels produce ties, ties destroy NDCG. Rank-average continuous scores instead.
 
-11. **Overtraining.** CTR models at this scale typically peak after 1 to 3 epochs then degrade. Early stopping with patience 1.
+11. **Overtraining.** ~~CTR models at this scale typically peak after 1 to 3 epochs then degrade. Early stopping with patience 1.~~ **Corrected 2026-08-31 by measurement — this was wrong for DeepFM and cost real score.** The claim was inherited as a general prior and never checked against this dataset. It set `DeepFMModel`'s `max_epochs` default to 3 and hard-locked `patience` to exactly 1. Measured via `_score_folds` (which is what picks the refit budget in `_run_full`): every fold pinned to the cap at 3, 10 and 25 epochs, and only stopped on its own at **35–41**, with caps 50 and 100 agreeing exactly — real convergence, not another ceiling. Validation loss fell monotonically throughout and patience never fired. Fold primaries climbed `0.5234 → 0.5332 → 0.5391 → 0.5419` on the hardest fold across caps 3/10/25/40, so the default was stopping training at ~7% of what the model needed and costing ~0.019 primary per fold. **DeepFM's default is now 40, the same as FM's, and the `patience != 1` lock is lifted** (default still 1, since it demonstrably was not the binding constraint; unlocking lets C6/Optuna explore it). The transferable lesson is the one this whole trap list exists for: **an inherited prior about "models like this" is a hypothesis, not a setting.** Early stopping only protects against overtraining if the budget is large enough for it to ever fire — a cap below the convergence point silently disables it, and the run looks like a converged model rather than a truncated one. Cheap check: compare `best_epoch` against `max_epochs`; equality means the cap bound and the number is not a convergence result. Pinned by `test_deepfm_default_epoch_budget_allows_convergence`.
 
 12. **Retrofitting logs.** The run-log is a graded deliverable requiring per-iteration hypothesis, diff, metrics, and error events. Build the node schema on Day 1 or the data will not exist on Day 3.
 
