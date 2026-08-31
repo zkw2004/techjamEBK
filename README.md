@@ -143,10 +143,16 @@ python -m tools.probes --fidelity screen --fm-trials 30
 ```
 
 The unattended agent uses the Anthropic key in your ignored `.env` and writes
-an append-only record for every proposal, pilot, failure, and recovery:
+an append-only record for every proposal, pilot, failure, and recovery.
+
+`cli.py` is the supported entry point: it loads `.env`, archives any prior
+ledger under `--fresh`, and parses these flags. **`python -m agent.loop` also
+starts a run, but its `main()` takes Python keyword arguments and never reads
+`argv`** — so `python -m agent.loop --max-iterations 10` silently runs the
+default 50 instead of failing. Use `cli.py`.
 
 ```bash
-python -m agent.loop
+python3 cli.py run --fresh --max-iterations 50 --max-hours 6
 python -m tools.report \
   --markdown-output artifacts/experiment-report.md \
   --json-output artifacts/experiment-report.json \
