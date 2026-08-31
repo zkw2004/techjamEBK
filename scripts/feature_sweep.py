@@ -142,7 +142,27 @@ def main(argv: list[str] | None = None) -> int:
          "min_delta_floor": gate.MIN_DELTA_FLOOR, "results": results}, indent=2))
 
     candidates = [r for r in results if r.get("verdict") == "CANDIDATE"]
+    errored = [r for r in results if r.get("verdict") == "error"]
     print("\n" + "=" * 100)
+    if errored:
+        # A sweep that lost runs has not tested the registry and must not report
+        # as though it had. "No feature cleared the floor" reads as a finding
+        # about the features; with runs missing it is a finding about the sweep.
+        # This is not hypothetical -- the first full run of this script lost 15
+        # of 21 features to a FileNotFoundError (the working-tree copy of this
+        # file was removed by a branch switch mid-run, and macOS spawn
+        # re-imports __main__ by path in every child) and still printed a
+        # confident "no feature clears the floor". Name the gap; exit non-zero.
+        print(f"INCOMPLETE: {len(errored)} of {len(results)} feature(s) errored "
+              f"and were NOT tested:")
+        for item in errored:
+            print(f"  {item['feature']}")
+        print("\nNo conclusion is drawn from a partial sweep. Re-run the missing")
+        print("features before reading anything into the ones that finished:")
+        print("  python3 scripts/feature_sweep.py --features "
+              + " ".join(item["feature"] for item in errored))
+        print(f"\nPartial results written to {RESULTS_PATH}")
+        return 1
     if candidates:
         print(f"{len(candidates)} feature(s) clear D12's combined rule at "
               f"{fidelity} tier:")
