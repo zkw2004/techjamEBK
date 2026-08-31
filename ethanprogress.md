@@ -1,5 +1,25 @@
 # Ethan Workstream Progress
 
+> **ARCHIVED — historical working log, not current status.**
+>
+> Last updated 2026-08-30, while Workstream C was still on branch
+> `codex/continue-c-workflow`. Everything it describes as "Complete locally;
+> not pushed" has since merged, and several numbers here were later
+> invalidated by two measurement bugs found on 2026-08-31 — an FM encoder
+> that silently destroyed 13 of ~20 registered features, and a DeepFM
+> `max_epochs` default that truncated training at ~7% of convergence. Any
+> DeepFM or feature figure below predates those fixes.
+>
+> **For current status, read instead:**
+> - [`artifacts/experiment-report.md`](artifacts/experiment-report.md) —
+>   generated from the append-only ledger, never hand-typed
+> - [`AGENT_PLAN.md` §14A](AGENT_PLAN.md) — the 2026-08-31 experimental record
+> - [`README.md`](README.md) — converged-run result and submission
+>
+> Kept tracked because it records genuine project history, and because
+> [`SETUP.md`](SETUP.md) links here for the OpenMP backend-isolation fix,
+> which is still accurate.
+
 Working status for Workstream C: experiment execution, models, losses, tuning,
 and blending. Read `ethannotes.md` for the full technical brief and
 `AGENT_PLAN.md` for frozen contracts.

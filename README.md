@@ -21,9 +21,33 @@ bootstrap promotion, append-only experiment records, and final submission
 generation. Day-0 contract checks and baseline reproduction are recorded in
 [DAY0.md](DAY0.md).
 
-The active deliverable is an evidence-backed run, not a claim that every model
-is universally best. Run the probes, inspect the ledger, then finalise the
-accepted validation-best configuration.
+**A converged unattended run is complete and is the submitted result.**
+
+| | |
+|---|---|
+| Nodes | 21, stop reason `converged` |
+| Accepted | 1 — the seeded FM baseline anchor, validation primary **0.601684** |
+| Best measured, *not* promoted | FM with BPR pairwise loss: **+0.000816** over the anchor at 5-seed confirm tier, 95% CI **[+0.000193, +0.003474]** |
+| Resources | 40,642 LLM tokens (32,796 in / 7,846 out), 0 GPU-hours |
+| Manual interventions | **0** |
+| Submission | [`submission.csv`](submission.csv), 170,588 rows, passes the organiser's `submit.py --check` |
+
+No candidate the loop proposed cleared the promotion gate, which requires
+**both** a point delta ≥ 0.002 **and** a bootstrap 95% CI excluding zero. The
+BPR result is a real, reproducible effect — its CI excludes zero — that still
+falls under the 0.002 floor (≈2.5× the measured 0.0008 seed-noise std), so it
+is reported as a verified non-win rather than rounded up. The baseline anchor
+therefore remains the validation-best accepted checkpoint and is what was
+finalised.
+
+Read any delta in context: validation candidate lists are a median of **4
+items per user**, and only **57.8%** of users contribute to GAUC at all.
+
+Evidence lives in [artifacts/](artifacts/) and the append-only ledger in
+[logs/nodes/](logs/nodes/). Deliverables are indexed in
+[SUBMISSION_CHECKLIST.md](SUBMISSION_CHECKLIST.md) and
+[DELIVERABLES.md](DELIVERABLES.md); the narrative is in
+[DEVPOST.md](DEVPOST.md).
 
 ### Corrections to AGENT_PLAN.md, read out of the shipped code
 
@@ -45,7 +69,18 @@ against the plan's prose would be wrong.
    through crosses with item-side terms.
 5. **B8 cannot debias training.** `log_random_4_22_to_5_08_pure.csv` is
    entirely after the 21 April training cutoff, so under the plan's own rule
-   it is an unbiased validation set only.
+   it is an unbiased validation set only. Confirmed independently by direct
+   measurement: `is_rand` is **0 for all 1,141,112 training rows**, so there
+   is no unbiased slice to estimate an exposure propensity from and IPS has
+   no estimable weights. Closed as WONTFIX, not descoped.
+6. **The plan's "CTR models peak after 1–3 epochs" prior is false for this
+   model** (trap 11). It set DeepFM's `max_epochs` default to 3. Measured on
+   this dataset, every internal fold pinned to the cap at 3, 10 and 25 epochs
+   and only stopped on its own at **35–41**; caps of 50 and 100 agree exactly,
+   so that is real convergence. The default was truncating training at ~7% of
+   what the model needed, costing ~0.019 primary per fold. Now 40, matching
+   FM's own default. An inherited prior about "models like this" is a
+   hypothesis, not a setting.
 
 The organisers' own ranked headroom is loss function → user history sequences
 → multi-task → watch-time censored regression → model class. The plan's ladder
@@ -136,6 +171,18 @@ make data
 make check
 ```
 
+`make help` lists one-command wrappers for every step below — `selfcheck`,
+`preflight`, `baseline`, `probes`, `run`, `report`, `finalize`. The explicit
+commands are kept here so the flags are visible.
+
+Verify the environment before spending a run budget. `make baseline` must
+reproduce the organiser's published 0.6016 within one seed-std:
+
+```bash
+make selfcheck
+make baseline
+```
+
 Run the five model-direction probes on internal temporal folds (the default
 does not spend the official validation window):
 
@@ -179,12 +226,18 @@ test submission. This refits the chosen configuration on the permitted
 loader's test order, and calls the untouched organiser checker:
 
 ```bash
-python -m tools.finalise --node n017 --output submission.csv
+make finalize                    # defaults to the best accepted node
+make finalize NODE=n003          # or name one explicitly
 ```
 
-Replace `n017` with the accepted full/confirm node ID. The output has exactly
-`row_id,user_id,video_id,score`; `row_id` is the positional index from
-`pipeline.data.load()`, never a join on user/video pairs.
+Omitting `NODE` selects the best accepted node automatically; in the committed
+run that is `n003`, the baseline anchor. Finalisation **fails closed** if the
+ledger holds no accepted full/confirm node, which is deliberate — it stops an
+unpromoted pilot from reaching the hidden test set.
+
+The output has exactly `row_id,user_id,video_id,score`; `row_id` is the
+positional index from `pipeline.data.load()`, never a join on user/video
+pairs.
 
 For the optional finals demo, [WALKTHROUGH.md](WALKTHROUGH.md) provides the
 three-minute shot list and a safe deterministic OOM-recovery replay:

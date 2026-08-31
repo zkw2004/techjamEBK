@@ -56,6 +56,12 @@ report:  ## Regenerate report + trajectory from the append-only ledger
 # ledger holds no accepted full/confirm node (tools/finalise.py::FinaliseError),
 # which is the intended behaviour -- there is nothing valid to submit.
 NODE ?=
+# submit.py defaults --data_dir to ./KuaiRand-Pure/data, which is not where
+# `make data` puts the archive; without the explicit path it dies on
+# FileNotFoundError. tools/finalise.py::_run_starter_check already passes the
+# correct path, so this second invocation is a visible re-confirmation of a
+# check that has already run and gated the write.
 finalize:  ## Refit the accepted winner and write submission.csv
 	python3 cli.py finalize $(if $(NODE),--node $(NODE),) --output submission.csv
-	python3 kuairand-starter-kit/submit.py --check --split test submission.csv
+	python3 kuairand-starter-kit/submit.py submission.csv \
+		--check --data_dir data/KuaiRand-Pure/data --split test

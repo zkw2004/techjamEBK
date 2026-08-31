@@ -1,5 +1,27 @@
 # fablehandoff — comprehensive continuation brief for the next agent
 
+> **ARCHIVED — historical handoff brief, not current status.**
+>
+> Written 2026-08-29 to hand the repo to the next session. Its "what remains"
+> list is long since done: the agent loop (A6), the ablation and scheduler
+> layers, citations, the leak preflight, and judge-visible reporting all
+> shipped, and PR 19 — described here as pending — merged. A converged
+> unattended run has since completed and been submitted.
+>
+> Some technical claims here were also invalidated on 2026-08-31 by two
+> measurement bugs: an FM encoder that memorised continuous features
+> value-by-value (13 of ~20 registered features unusable, 8 of them 100%
+> unseen at validation) and a DeepFM `max_epochs` default of 3 against a real
+> convergence point of 35–41. Model and feature numbers below predate both.
+>
+> **For current status, read instead:**
+> - [`README.md`](README.md) — converged-run result and submission
+> - [`SUBMISSION_CHECKLIST.md`](SUBMISSION_CHECKLIST.md) — the deliverables
+> - [`AGENT_PLAN.md` §14A](AGENT_PLAN.md) — the 2026-08-31 experimental record
+>
+> Kept for provenance: the design reasoning and the frozen-contract rationale
+> it explains are still the basis for how the loop is built.
+
 Written 2026-08-29, end of the session that delivered C3 + the innovation
 layer and integrated the A/B workstreams. This document is self-contained:
 it tells you where the repo stands, what was decided and why, exactly what

@@ -166,17 +166,24 @@ python3 cli.py report            # markdown
 python3 cli.py report --json     # JSON
 ```
 
-Produce the final submission from the accepted node (replace `n017` with the
-actual accepted full/confirm node ID from your run):
+Produce the final submission. Omitting `--node` selects the best accepted
+full/confirm node automatically, which is what you normally want:
 
 ```bash
-python3 cli.py finalize --node n017 --output submission.csv
+python3 cli.py finalize --output submission.csv          # best accepted node
+python3 cli.py finalize --node n003 --output submission.csv   # or name one
 ```
 
-Validate the submission against the organiser's own checker:
+This fails closed if the ledger holds no accepted full/confirm node — that is
+deliberate, and stops an unpromoted pilot reaching the hidden test set.
+
+`finalize` already runs the organiser's checker for you. To re-run it by hand,
+note that `--data_dir` is **required** — `submit.py` otherwise looks in
+`./KuaiRand-Pure/data`, which is not where `make data` puts the archive:
 
 ```bash
-python3 kuairand-starter-kit/submit.py --check --split test submission.csv
+python3 kuairand-starter-kit/submit.py submission.csv \
+  --check --data_dir data/KuaiRand-Pure/data --split test
 ```
 
 ## 10. Other useful commands
