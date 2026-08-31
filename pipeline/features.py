@@ -1130,3 +1130,262 @@ def user_long_view_rate_decayed(train_df, target_df) -> np.ndarray:
     feature — a real capability `user_ctr_decayed` alone does not have.
     """
     return _decayed_smoothed_rate(train_df, target_df, "user_id", LABEL)
+
+
+# --- sim_to_history (B14) ----------------------------------------------------
+#
+# New task, not yet written into AGENT_PLAN.md when this was built -- handed
+# down directly by the team, high priority because it paces Ethan's C10
+# (the sequence-model rung, Section 6.7's rung 6, "skip unless ahead of
+# schedule" -- the team is ahead of schedule, having already shipped C9,
+# rung 5, multi-task DeepFM, also originally conditional on being ahead).
+#
+# Citation (Section 6.8's feature-policy table): the "Sequence summaries:
+# last-N author/category affinity, time since prior event" row, controlled
+# as "Use after audit / Chronological construction, no look-ahead". This is
+# the first feature in this codebase implementing that row -- prior work
+# (user_tag_affinity, B4) covers "Identifiers"/tag-based target encoding,
+# not a recency-anchored sequence summary.
+#
+# Registered under the exact name `sim_to_history` (not, e.g.,
+# `user_tag_history_similarity`) on explicit team instruction: C10 will
+# reference it by this literal string.
+
+
+def _prior_sum_by_time(source, group_cols: list[str], value_col: str) -> np.ndarray:
+    """Strictly-prior cumulative sum of `value_col` within `group_cols`,
+    keyed by `_time`.
+
+    Generalises the cumsum-then-subtract-current-bucket trick
+    `_prior_group_stats`/`_prior_group_decayed_stats` already use in this
+    file to an arbitrary value column and an arbitrary number of grouping
+    columns -- needed here for the composite (user_id, tag) key that
+    `_in_sample_sim_to_history` groups by. Rows sharing a `_time` within the
+    same group exclude each other from one another's prior sum, exactly as
+    `_event_times`'s docstring establishes for every other in-sample helper
+    in this file.
+
+    `source` must carry a `_time` column plus every column named in
+    `group_cols`. The returned array is aligned to `source`'s own row order
+    (via an internal row counter, then a stable sort undoing whatever order
+    the groupby/merge round trip left rows in) regardless of `source`'s own
+    pandas index.
+    """
+    working = source.reset_index(drop=True)
+    working = working.assign(_row=np.arange(len(working)))
+    group_keys = [*group_cols, "_time"]
+    bucket_sums = working.groupby(group_keys, sort=True, dropna=False)[value_col].sum()
+    bucket_sums = bucket_sums.to_frame("_bucket_sum")
+    level = list(range(len(group_cols)))
+    bucket_sums["_prior_sum"] = bucket_sums.groupby(level=level, sort=False)["_bucket_sum"].cumsum()
+    bucket_sums["_prior_sum"] -= bucket_sums["_bucket_sum"]
+    merged = working.merge(
+        bucket_sums[["_prior_sum"]].reset_index(),
+        on=group_keys,
+        how="left",
+        sort=False,
+        validate="many_to_one",
+    ).sort_values("_row", kind="stable")
+    return merged["_prior_sum"].to_numpy(dtype=np.float64)
+
+
+def _in_sample_sim_to_history(train_df) -> np.ndarray:
+    """Strictly-prior in-sample counterpart of `sim_to_history`'s cross-frame
+    branch, used when `train_df is target_df`
+    (`pipeline/train.py::_matrix` builds the training design matrix this
+    way; Section 8.4's dual-path requirement).
+
+    Positivity is read from `train_df`'s own label column -- legal, since it
+    is determined per-row from `train_df`'s own data, exactly the reasoning
+    `_in_sample_pcr`'s docstring gives for reading `play_time_ms` off
+    `train_df` only.
+
+    Every row of `train_df` (positive or not) is exploded by its own tags
+    into ONE combined table, tagging each exploded entry with a
+    "positive decayed weight contribution": the row's own `decay_weights`
+    value when its label is positive, else 0.0. Both roles this feature
+    needs -- "history" (a positive row's weight feeding its own (user, tag)
+    bucket) and "query" (every row, positive or not, needs an output value
+    computed from strictly-prior positive history) -- are read off that same
+    table. That is what lets a plain `_time`-keyed cumulative-sum-then-
+    subtract (`_prior_sum_by_time`) work at all here: every (user, tag,
+    time) bucket a query row needs is guaranteed already present to merge
+    against, because a negative row still creates a bucket (contributing
+    weight 0), it just never inflates any prior sum. Splitting "history"
+    and "query" into two independently-exploded frames would not have this
+    property -- a query row's own (user, tag, time) triple would not
+    reliably exist in a history table built only from positive rows.
+
+    Decay weighting IS applied here, unlike `_in_sample_pcr`'s deliberate
+    no-decay choice (see that function's own docstring for its rationale,
+    specific to that feature, not a blanket rule for this file) -- decay is
+    the entire reason this feature is a *recency*-anchored signal rather
+    than a plain historical rate, so dropping it on the in-sample path would
+    silently make this a different, weaker feature than its cross-frame
+    twin.
+    """
+    labels = _numeric_labels(train_df)
+    times = _event_times(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("sim_to_history requires valid training dates")
+    weights = decay_weights(dates, dates.max())
+    is_positive = labels.to_numpy() == 1.0
+
+    exploded = pd.DataFrame(
+        {
+            "_position": np.arange(len(train_df)),
+            "_time": times.to_numpy(),
+            "user_id": train_df["user_id"].to_numpy(),
+            "_tag": train_df["tag"].map(_split_tags).to_numpy(),
+            "_pos_weight": np.where(is_positive, weights, 0.0),
+        }
+    ).explode("_tag", ignore_index=True)
+    exploded = exploded.loc[exploded["_tag"].notna()].copy()
+
+    result = np.zeros(len(train_df), dtype=np.float64)
+    if exploded.empty:
+        return result
+
+    tag_prior = _prior_sum_by_time(exploded, ["user_id", "_tag"], "_pos_weight")
+    user_prior_total = _prior_sum_by_time(exploded, ["user_id"], "_pos_weight")
+    exploded["_share"] = np.divide(
+        tag_prior,
+        user_prior_total,
+        out=np.zeros(len(exploded), dtype=np.float64),
+        where=user_prior_total > 0,
+    )
+    per_row = exploded.groupby("_position", sort=False)["_share"].mean()
+    result[per_row.index.to_numpy(dtype=int)] = per_row.to_numpy(dtype=np.float64)
+    return result
+
+
+@feature("sim_to_history")
+def sim_to_history(train_df, target_df) -> np.ndarray:
+    """Attention-SHARE overlap between a candidate video's tags and a
+    user's own recent, positively-engaged watch history (B14).
+
+    Formula. For each user u, build a decayed tag-exposure distribution
+    from u's historical positive rows only (this file's scored label is
+    positive when it equals 1, per the correction documented near `LABEL`
+    above): for every (u, tag) pair, sum `decay_weights` (B5) over u's
+    positive history rows containing that tag (a video can carry several
+    tags; `_split_tags` explodes one row per tag, following the same
+    "explode, ignore_index=True, drop nulls" pattern `user_tag_affinity`
+    already uses for its own multi-tag column). Each (u, tag) weight is then
+    normalised by u's TOTAL decayed positive weight across all their tags,
+    giving a probability-like distribution over the tags u has recently,
+    positively engaged with (sums to 1 per user with any positive history).
+    For a target row belonging to user u with candidate tags T (read off
+    `target_df`'s own tag column -- static, pre-exposure metadata, legal to
+    read directly off the target frame, exactly as `user_tag_affinity`
+    already does): `sim_to_history = mean over t in T of
+    normalized_weight(u, t)`. A (user, tag) combination with no historical
+    positive signal contributes 0.0.
+
+    Fallback (0.0, not a global-mean fallback). A target row with no tags,
+    or a user with no positive history at all, returns 0.0. This is
+    deliberately different from the global-rate fallback `_group_rate` and
+    the decayed/EB-smoothed rate features (`user_ctr_decayed`,
+    `_decayed_smoothed_rate`) use for their own unseen groups: those are
+    RATE-style features estimating "how likely is this outcome", where a
+    population-level average rate is a meaningful prior for a sparse or
+    unseen group. `sim_to_history` estimates an ATTENTION-SHARE / overlap
+    quantity -- "what fraction of this user's own recent positive attention
+    landed on tags this candidate shares" -- and there is no analogous
+    population-level "average similarity" a user with zero positive history
+    could sensibly be assigned; 0.0 ("no information, no measured overlap")
+    is the only well-defined value in that case, not an approximation of
+    one that was skipped for convenience.
+
+    Why this is NOT redundant with `user_tag_affinity` (B4), mirroring how
+    `user_long_view_rate_decayed`'s docstring documents its own
+    non-redundancy with `user_ctr_decayed` rather than leaving the
+    similarity unexplained. `user_tag_affinity` estimates an ENGAGEMENT
+    RATE: among a user's rows carrying a given tag, what fraction were a
+    positive outcome. That rate can be high from a single old row (n=1,
+    positive) and never decays or restricts itself to positive-only
+    history -- it mixes positive and negative rows together to estimate a
+    conditional probability. `sim_to_history` instead estimates ATTENTION
+    SHARE within positive-only, decayed-recency history: "of what this user
+    has recently, positively watched, how much of it shares this
+    candidate's tags." A user who watched one old video on tag X to
+    completion (rate-wise, a perfect affinity for X) years before a burst of
+    recent positive activity entirely on tag Y will show near-zero
+    `sim_to_history` for an X-tagged candidate today (that mass now belongs
+    almost entirely to Y) while `user_tag_affinity` for X stays high --
+    they diverge by construction, not by coincidence. This is the
+    recency-anchored "last-N tag affinity" signal Section 6.8's Sequence
+    summaries row names, and the first feature in this codebase to
+    implement that row (`user_tag_affinity`/B4 belongs to the Identifiers
+    row's target-encoding control, not Sequence summaries).
+
+    Dual path (Section 8.4, frozen). Cross-frame:
+    `_assert_historical_cutoff` first (fails closed unless every train date
+    precedes every target date), fit entirely on `train_df`'s positive rows,
+    apply to `target_df`. In-sample (`train_df is target_df`):
+    `_assert_historical_cutoff` would reject same-frame input outright
+    (dates overlap by construction), so this delegates to
+    `_in_sample_sim_to_history`, which uses `_event_times` plus a strictly-
+    prior cumulative decayed sum (`_prior_sum_by_time`) so a row never sees
+    its own or a same-`time_ms` row's positive tags -- see that function's
+    own docstring for why decay weighting is applied there too, unlike
+    `_in_sample_pcr`'s undecayed precedent.
+
+    Leakage. Reads `target_df`'s user_id and tag columns only -- both
+    static, pre-exposure, legal identifiers/metadata (the same target-side
+    reads `user_tag_affinity` already makes) -- and never reads target_df's
+    scored label or any FORBIDDEN_SAME_ROW column. Passes `leakage_check`
+    both statically and dynamically.
+    """
+    if train_df is target_df:
+        return _in_sample_sim_to_history(train_df)
+
+    _assert_historical_cutoff(train_df, target_df)
+    labels = _numeric_labels(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("sim_to_history requires valid training dates")
+    weights = decay_weights(dates, dates.max())
+
+    result = np.zeros(len(target_df), dtype=np.float64)
+    is_positive = labels.to_numpy() == 1.0
+    if not is_positive.any() or target_df.empty:
+        return result
+
+    positive_train = pd.DataFrame(
+        {
+            "user_id": train_df["user_id"].to_numpy()[is_positive],
+            "_weight": weights[is_positive],
+            "_tag": train_df["tag"].map(_split_tags).to_numpy()[is_positive],
+        }
+    ).explode("_tag", ignore_index=True)
+    positive_train = positive_train.loc[positive_train["_tag"].notna()]
+    if positive_train.empty:
+        return result
+
+    tag_weight = positive_train.groupby(["user_id", "_tag"], sort=False)["_weight"].sum()
+    user_total = positive_train.groupby("user_id", sort=False)["_weight"].sum()
+    denominators = tag_weight.index.get_level_values("user_id").map(user_total).to_numpy(
+        dtype=np.float64
+    )
+    normalized = tag_weight / denominators
+
+    exploded_target = pd.DataFrame(
+        {
+            "_position": np.arange(len(target_df)),
+            "user_id": target_df["user_id"].to_numpy(),
+            "_tag": target_df["tag"].map(_split_tags).to_numpy(),
+        }
+    ).explode("_tag", ignore_index=True)
+    exploded_target = exploded_target.loc[exploded_target["_tag"].notna()]
+    if exploded_target.empty:
+        return result
+
+    pairs = pd.MultiIndex.from_frame(exploded_target[["user_id", "_tag"]])
+    exploded_target = exploded_target.assign(
+        _share=normalized.reindex(pairs).fillna(0.0).to_numpy()
+    )
+    row_share = exploded_target.groupby("_position", sort=False)["_share"].mean()
+    result[row_share.index.to_numpy(dtype=int)] = row_share.to_numpy(dtype=np.float64)
+    return result
