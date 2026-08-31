@@ -863,3 +863,270 @@ def long_view_rate_by_duration_group(train_df, target_df) -> np.ndarray:
         .fillna(global_rate)
         .to_numpy(dtype=np.float64)
     )
+
+# --- Auxiliary-signal historical rates (B11) --------------------------------
+#
+# Per-user and per-video historical rates of the OTHER feedback signals
+# (is_click, is_like, is_follow), plus a video-level counterpart of the
+# scored long_view rate. Time-decayed (decay_weights, B5) and EB-smoothed
+# (eb_smooth, B5), fit on train_df only.
+#
+# Citation (Appendix D idea bank): ESMM-style multi-feedback usage — "11
+# unscored signals carry information about the scored one." is_click,
+# is_like, and is_follow are all in FORBIDDEN_SAME_ROW: illegal as same-row
+# inputs read off target_df, but explicitly legal as historical aggregates
+# over a user's/video's PAST rows read off train_df only (Section 6.8's
+# historical-aggregate carve-out; Section 11 trap 2). Every function below
+# reads its auxiliary column from train_df exclusively, never target_df —
+# that is what makes the carve-out apply.
+#
+# Overlap note: `user_ctr` (B4) and `user_ctr_decayed` (B5) already cover
+# the raw and decayed+smoothed user-level long_view rate. There was no
+# video-level decayed+smoothed long_view counterpart before this task; see
+# `video_long_view_rate_decayed` below, which fills that gap. See
+# `user_long_view_rate_decayed`'s docstring for why it is *not* a plain
+# delegate to `user_ctr_decayed` despite matching it exactly on the
+# cross-frame path.
+
+
+def _numeric_outcome(train_df, column: str) -> pd.Series:
+    """Validate and normalise a train-only auxiliary outcome column.
+
+    Generalises `_numeric_labels` to any FORBIDDEN_SAME_ROW auxiliary
+    signal (is_click, is_like, is_follow) as well as LABEL itself, so the
+    B11 helpers below can be parameterised by column name. Reading this
+    column off train_df is the legal half of Section 6.8's historical-
+    aggregate carve-out; it must never be read off target_df.
+    """
+    values = pd.to_numeric(train_df[column], errors="coerce")
+    if values.isna().any() or not np.isfinite(values.to_numpy(dtype=np.float64)).all():
+        raise ValueError(f"training column {column!r} must contain only finite numbers")
+    return values.astype(np.float64)
+
+
+def _prior_group_decayed_stats(
+    frame,
+    labels: pd.Series,
+    times: pd.Series,
+    key: str,
+    weights: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Decayed weighted label-sum / weighted impression-sum for `key`,
+    strictly before each row's own event time.
+
+    `weights` are precomputed per-row decay weights relative to a single
+    frame-wide cutoff (matching the cross-frame convention `user_ctr_decayed`
+    and `_decayed_smoothed_rate` below use), so — unlike the label values —
+    they carry no future information and need no additional masking beyond
+    the strictly-earlier-time grouping shared with `_prior_group_stats`.
+    Rows sharing a timestamp are excluded from each other's prior sums,
+    exactly as `_prior_group_stats` and `_event_times` document: two rows
+    at the same time see the same prior state and never one another's
+    label.
+    """
+    source = pd.DataFrame(
+        {
+            "_position": np.arange(len(frame)),
+            "_time": times.to_numpy(),
+            "_weighted_label": labels.to_numpy() * np.asarray(weights, dtype=np.float64),
+            "_weight": np.asarray(weights, dtype=np.float64),
+            key: frame[key].to_numpy(),
+        }
+    )
+    group_keys = [key, "_time"]
+    grouped = source.groupby(group_keys, sort=True, dropna=False)[
+        ["_weighted_label", "_weight"]
+    ].sum()
+    grouped["_prior_label"] = grouped.groupby(level=0, sort=False)["_weighted_label"].cumsum()
+    grouped["_prior_label"] -= grouped["_weighted_label"]
+    grouped["_prior_weight"] = grouped.groupby(level=0, sort=False)["_weight"].cumsum()
+    grouped["_prior_weight"] -= grouped["_weight"]
+    states = source.merge(
+        grouped[["_prior_label", "_prior_weight"]].reset_index(),
+        on=group_keys,
+        how="left",
+        sort=False,
+        validate="many_to_one",
+    ).sort_values("_position", kind="stable")
+    return (
+        states["_prior_label"].to_numpy(dtype=np.float64),
+        states["_prior_weight"].to_numpy(dtype=np.float64),
+    )
+
+
+def _in_sample_decayed_smoothed_rate(
+    train_df,
+    key: str,
+    column: str,
+    alpha: float = 20.0,
+    half_life_days: float = 7.0,
+) -> np.ndarray:
+    """In-sample counterpart of the cross-frame branch in
+    `_decayed_smoothed_rate`, used when `train_df is target_df`
+    (`pipeline/train.py::_matrix` builds the training matrix this way).
+
+    `_assert_historical_cutoff` would reject same-frame input outright
+    (train and target dates overlap by construction), so this instead
+    mirrors `_in_sample_group_rate`'s pattern: per-row prior sums keyed by
+    `time_ms` via `_event_times`/`_prior_group_decayed_stats`, which is why
+    a row never sees its own or a same-timestamp row's outcome (see
+    `_event_times`'s docstring — this is the literal mechanism behind the
+    acceptance criterion "a row on date t uses only rows with date < t";
+    `time_ms` is finer-grained than the date and strictly implies it).
+
+    The decay cutoff is the whole frame's max training date — a fixed,
+    non-label-derived scalar — matching the single-cutoff convention
+    `user_ctr_decayed` uses on the cross-frame path (recency is measured
+    against the end of the training window, not against each row's own
+    date); reusing a fixed cutoff here introduces no leakage, it only
+    changes which reference point recency is measured from. The EB prior is
+    the row-specific *prior* global rate (`_prior_global_rates`, matching
+    `_in_sample_group_rate`'s convention), not the whole-frame mean
+    `user_ctr_decayed` uses on the cross-frame path — the whole-frame mean
+    would leak later rows into an earlier row's smoothing prior here.
+    """
+    labels = _numeric_outcome(train_df, column)
+    times = _event_times(train_df)
+    global_rates = _prior_global_rates(labels, times)
+
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError(f"{column} decayed rate requires valid training dates")
+    weights = decay_weights(dates, dates.max(), half_life_days=half_life_days)
+
+    prior_weighted_label, prior_weight = _prior_group_decayed_stats(
+        train_df, labels, times, key, weights
+    )
+    # Same formula as eb_smooth (Appendix A.1: r = (c + alpha*g)/(n+alpha)),
+    # written out directly because eb_smooth's signature takes one scalar
+    # global_rate, while this path's EB prior (global_rates) is per-row.
+    return (prior_weighted_label + alpha * global_rates) / (prior_weight + alpha)
+
+
+def _decayed_smoothed_rate(train_df, target_df, key: str, column: str) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical rate of `column` per `key`.
+
+    Shared implementation behind the eight B11 auxiliary-signal features.
+    Mirrors `user_ctr_decayed`'s (B5) cross-frame computation, generalised
+    to any train-only outcome column and grouping key, plus an in-sample
+    branch (`_in_sample_decayed_smoothed_rate`) that `user_ctr_decayed`
+    itself does not have (point 4 of this task requires both paths, since
+    `pipeline/train.py::_matrix` calls features both cross-frame and as
+    `(train_frame, train_frame)`).
+    """
+    if train_df is target_df:
+        return _in_sample_decayed_smoothed_rate(train_df, key, column)
+
+    _assert_historical_cutoff(train_df, target_df)
+    labels = _numeric_outcome(train_df, column)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError(f"{column} decayed rate requires valid training dates")
+
+    weights = decay_weights(dates, dates.max())
+    fitting_rows = pd.DataFrame(
+        {
+            key: train_df[key].to_numpy(),
+            "_weighted_positive": weights * labels.to_numpy(),
+            "_weight": weights,
+        }
+    )
+    grouped = fitting_rows.groupby(key, sort=False)
+    weighted_positives = grouped["_weighted_positive"].sum()
+    effective_impressions = grouped["_weight"].sum()
+    global_rate = float(labels.mean())
+    rates = eb_smooth(weighted_positives, effective_impressions, global_rate)
+    return target_df[key].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
+
+
+@feature("user_click_rate_decayed")
+def user_click_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical is_click rate per user (B11).
+
+    is_click is FORBIDDEN_SAME_ROW: illegal as a same-row input read off
+    target_df, legal as a historical aggregate over train_df's past rows
+    only (Section 6.8, Section 11 trap 2). ESMM-style multi-feedback usage:
+    an unscored signal (click) carries information about the scored one
+    (long_view).
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "user_id", "is_click")
+
+
+@feature("user_like_rate_decayed")
+def user_like_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical is_like rate per user (B11).
+
+    See `user_click_rate_decayed` for the leakage/citation rationale.
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "user_id", "is_like")
+
+
+@feature("user_follow_rate_decayed")
+def user_follow_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical is_follow rate per user (B11).
+
+    See `user_click_rate_decayed` for the leakage/citation rationale.
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "user_id", "is_follow")
+
+
+@feature("video_click_rate_decayed")
+def video_click_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical is_click rate per video (B11).
+
+    See `user_click_rate_decayed` for the leakage/citation rationale.
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "video_id", "is_click")
+
+
+@feature("video_like_rate_decayed")
+def video_like_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical is_like rate per video (B11).
+
+    See `user_click_rate_decayed` for the leakage/citation rationale.
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "video_id", "is_like")
+
+
+@feature("video_follow_rate_decayed")
+def video_follow_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical is_follow rate per video (B11).
+
+    See `user_click_rate_decayed` for the leakage/citation rationale.
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "video_id", "is_follow")
+
+
+@feature("video_long_view_rate_decayed")
+def video_long_view_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical long_view rate per video (B11).
+
+    Fills a real gap: B4/B5 built the raw and decayed+smoothed *user*-level
+    long_view rate (`user_ctr`, `user_ctr_decayed`), but no video-level
+    decayed+smoothed counterpart existed before this task (`video_ctr` is
+    raw/undecayed only).
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "video_id", LABEL)
+
+
+@feature("user_long_view_rate_decayed")
+def user_long_view_rate_decayed(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical long_view rate per user (B11).
+
+    Naming-symmetry counterpart to the other seven B11 features (every
+    signal x granularity pair is registered as
+    `<granularity>_<signal>_rate_decayed`), so this signal x granularity
+    pair is discoverable the same way by A10's ablation drawer and B12's
+    within-user variance screen.
+
+    NOT a plain delegate to `user_ctr_decayed` (B5), even though the two
+    are numerically identical on the cross-frame path (see
+    `tests/test_aux_rates.py`): `user_ctr_decayed` has no
+    `train_df is target_df` branch, so calling it in-sample hits
+    `_assert_historical_cutoff` and raises. Routing this feature through
+    the same `_decayed_smoothed_rate` helper as the other seven gives it
+    working in-sample support too, which `pipeline/train.py::_matrix`'s
+    `(train_frame, train_frame)` call pattern requires of every registered
+    feature — a real capability `user_ctr_decayed` alone does not have.
+    """
+    return _decayed_smoothed_rate(train_df, target_df, "user_id", LABEL)
