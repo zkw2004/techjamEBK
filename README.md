@@ -239,8 +239,9 @@ The output has exactly `row_id,user_id,video_id,score`; `row_id` is the
 positional index from `pipeline.data.load()`, never a join on user/video
 pairs.
 
-For the optional finals demo, [WALKTHROUGH.md](WALKTHROUGH.md) provides the
-three-minute shot list and a safe deterministic OOM-recovery replay:
+Track 2 does not require a video, but the recommended approximately
+three-minute demo in [WALKTHROUGH.md](WALKTHROUGH.md) provides an end-to-end
+shot list and a safe deterministic OOM-recovery replay:
 
 ```bash
 python -m tools.oom_demo

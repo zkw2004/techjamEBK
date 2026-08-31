@@ -1,9 +1,9 @@
 # Three-minute walkthrough runbook
 
-Track 2 does not currently require a demo video, but this is a ready-to-record
-finals walkthrough. Record at 1080p with terminal text large enough to read.
-Keep a local capture as the fallback instead of depending on live network/API
-access during judging.
+Track 2 does not require a video, but an approximately three-minute demo is
+recommended when it helps explain the solution. This is a ready-to-record
+walkthrough; use 1080p with readable terminal text. Keep a local capture as a
+fallback instead of depending on live network/API access during judging.
 
 ## Before recording
 

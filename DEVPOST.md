@@ -24,7 +24,21 @@ configuration on the temporally legal train-plus-validation period, averages
 five distinct seeds, writes scores in untouched test-row order, and delegates
 the final check to the organiser's immutable submission script.
 
-## How we built it
+## Development tools
+
+We used Codex as the collaborative coding agent, Git and GitHub CLI for the
+branch/PR workflow, `uv` and Python virtual environments for reproducible
+dependency management, and GitHub Actions for continuous integration. Pytest,
+Ruff, pre-commit, and detect-secrets provide the local and CI quality gates.
+
+## APIs
+
+The autonomous loop calls the Anthropic Messages API with structured Pydantic
+outputs: Claude Opus proposes and reflects on experiments, while Claude Haiku
+handles bounded repairs. API token usage is captured on every call and included
+in the generated resource report.
+
+## Libraries and frameworks
 
 - Python 3.11/3.12 with Pydantic contracts for agent actions and configs.
 - NumPy and pandas for aligned score vectors, temporal features, and
@@ -32,15 +46,21 @@ the final check to the organiser's immutable submission script.
 - Factorization Machines, LightGBM pointwise/LambdaRank, and CPU DeepFM as the
   bounded model ladder.
 - Optuna TPE with median pruning and SQLite storage for resumable tuning.
-- Anthropic structured generation for hypothesis proposal and bounded repair.
+- Anthropic's Python SDK for structured hypothesis proposal and bounded repair.
 - Rich for the live node-tree view; Matplotlib and Jinja-friendly Markdown for
   generated reporting.
-- Pytest, Ruff, pre-commit, and detect-secrets in GitHub Actions.
+
+## Datasets and assets
 
 The only dataset is KuaiRand-Pure. The randomised-exposure slice is kept as a
 diagnostic because it begins after the training cutoff; it is never smuggled
 into training. The monthly item-statistics file remains excluded because its
 temporal provenance cannot be proved safe.
+
+Project assets are the organiser's immutable starter-kit evaluator and
+submission checker, the append-only run ledger, generated metric/resource
+reports, validation trajectory, and the optional walkthrough materials. No
+privately labelled data or hidden-test labels are used.
 
 ## Evaluation integrity
 

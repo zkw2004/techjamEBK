@@ -5,7 +5,20 @@ TechJam 2026, Track 2. Verified against `02_REQUIREMENTS.md` Part 5
 Re-run the commands under "Verify" yourself before submitting — this file is
 a snapshot, not a live check.
 
-## The 7 required deliverables
+## The 4 required deliverable groups
+
+- [x] **Written project description via Devpost** → [`DEVPOST.md`](DEVPOST.md)
+- [ ] **Public code/GitHub repository** → this repository; confirm visibility
+      while signed out before pasting the URL into Devpost
+- [x] **Run and iteration logs** → [`logs/nodes/`](logs/nodes/) and
+      [`logs/run.jsonl`](logs/run.jsonl)
+- [x] **Final submission, results summary, and resource usage** →
+      [`submission.csv`](submission.csv), [`DELIVERABLES.md`](DELIVERABLES.md),
+      and [`artifacts/experiment-report.md`](artifacts/experiment-report.md)
+
+The seven checks below verify the evidence supporting those four groups.
+
+## Evidence checks
 
 - [x] **D1 — Devpost writeup** → [`DEVPOST.md`](DEVPOST.md)
       Real numbers as of the converged run: 21 nodes, accepted primary
@@ -73,9 +86,10 @@ git ls-files | grep -x '\.env' || echo "not tracked"
 - [ ] `git push origin main` — confirm `git status -sb` shows no
       `[ahead N]`
 - [ ] Repo visibility set to Public (D2, not machine-checkable)
-- [ ] Optional: `WALKTHROUGH.md` demo video — **not required for Track 2**
-      per `02_REQUIREMENTS.md`'s own note ("Tracks 3, 4 and 5 list a demo
-      video as a deliverable. Track 2's list does not.")
+- [ ] Optional, recommended: record the approximately three-minute demo from
+      `WALKTHROUGH.md` if it helps explain the solution effectively. If it is
+      included, verify the uploaded link while signed out before adding it to
+      Devpost. A detailed written report is strongly encouraged without one.
 
 ## What "final" means for this run
 

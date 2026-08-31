@@ -28,7 +28,9 @@ python -m tools.report \
 ## Submission and presentation
 
 - [Devpost narrative](DEVPOST.md)
-- [Three-minute walkthrough and recovery demo](WALKTHROUGH.md)
+- [Recommended approximately three-minute walkthrough and recovery demo](WALKTHROUGH.md)
+  — optional for Track 2; the detailed written report is the primary
+  explanation when no video is submitted.
 - **Final submission** — `submission.csv`, uploaded to the competition
   platform rather than committed: `.gitignore` excludes `*.csv` to keep the
   194MB organiser archive out of git history, and the file is 6.4MB against a
