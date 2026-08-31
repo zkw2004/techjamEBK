@@ -333,6 +333,8 @@ A candidate that passes Full evaluation is not automatically promoted. It must c
 
 **On the statistical gate.** Baseline seed noise is 0.0008 std and the convergence threshold is 0.002. Without a significance test the agent will spend iterations chasing +0.0004. A fixed minimum-delta threshold is acceptable only if it is at least 0.002; anything below one standard deviation of noise will admit noise as improvement. The bootstrap CI is preferred and is what this plan specifies. Resample **users**, not rows (5.3). Implementation in Appendix A.3.
 
+**Both halves are required, not either.** A CI-only gate with no minimum-delta floor, or a minimum-delta floor applied only from the second full candidate on, both admit exactly the failure this paragraph warns about — see D12 and trap 5/13. The current implementation (`agent/loop.py::_accept_full`) applies both checks starting with the very first full-tier node measured against the official baseline, not only from the second candidate on.
+
 **On the segment gate.** GAUC is weighted by positive count, so a model can lift the headline number while getting worse for most people. Report the primary metric broken down by: user activity quartile, item popularity quartile, and day within the validation window. A candidate that improves overall while collapsing the sparse-user segment is either rejected or promoted with an explicit logged trade-off. Cheap to compute, and it makes an excellent log entry.
 
 ### 6.7 Model ladder (provisional, reorder after probes)
@@ -800,8 +802,13 @@ class BaseModel(Protocol):
 | A5 | Recovery policy per error class | A4 | `syntax` gets one repair; `oom` retries at reduced batch size; `timeout` reduces fidelity; `transient` backs off. All attempts logged. 3 consecutive dead nodes force a branch |
 | A6 | Main loop with fidelity escalation (smoke→screen→full) | A3, A4, A5, D2 | Runs 10 iterations unattended, zero human input; `manual_intervention` false on every node; cheap tiers filter the majority |
 | A7 | Family-diverse + epsilon-greedy parent selection | A2, A6 | All five families covered before any is refined twice; over 40 iterations, ≥15% of nodes branch from a non-best parent |
+| A10 | Ablation-driven drawer targeting. `ablate.py` takes the current best node and generates cheap variants: each registered feature group disabled in turn; loss swapped to pointwise; each ensemble member dropped. Runs them via `execute()` at screening fidelity, ranks component sensitivity (abs validation-primary delta), stores the sensitivity table on the node, and injects it into the `propose()` prompt. | A2, A4, B2, C1 | `test_ablate.py`: on a synthetic pipeline where one feature group carries all the signal, that group ranks first by sensitivity. Sensitivity table present in node JSON. `propose()` prompt string contains the rendered table. Total ablation wall-clock for one round ≤ 5 min at screening fidelity. |
+| A11 | Convergence-aware scheduler. `schedule.py` maintains (a) a strike counter: consecutive iterations with validation-primary improvement ≤ 0.002, reset on any improvement > 0.002; (b) a hedge queue of high-probability actions (Optuna refinement of the current best config, adding the top unused feature from the last ablation table). When strike counter = 2, the next action is forced from the hedge queue instead of free exploration. Counter and forced-hedge events are logged per iteration. **Motivated by a real incident:** a run converged after only 4 full evaluations — the earliest point the rule can fire — see trap 13 in Section 11. | A6, A10, C4 | `test_schedule.py`: in a simulated run where free exploration fails 6 times in a row, the run never reaches 3 strikes because hedges fire at strike 2. Strike counter value appears in every iteration's log line. Hedge-forced iterations are marked `scheduler_forced: true` in the node. |
+| A12 | Citations in hypotheses. Add optional `references: list[str]` to the `Action` schema. `propose()` prompt instructs the model to name the published method behind each hypothesis (e.g. "D2Q duration grouping, Zhan et al. KDD 2022") drawing from the idea bank (Appendix D). Run-log renderer prints the citation with the hypothesis. | A1, A3 | Schema round-trips with and without `references`. A propose call against the idea-bank prompt returns at least one populated citation in 3 of 5 sampled generations. Rendered run log shows `[ref: ...]` next to the hypothesis. `agent/prompts/idea_bank.md` not yet created — content is in Appendix D, pending wiring into `propose()`. |
 
 **Kaiwen also owns** `.env` handling and `pre-commit` with `detect-secrets` from the first commit. Secrets in git history are an unrecoverable scored failure.
+
+**Open question carried from A10–A12 planning:** does refitting the validation-best config on train+validation before final submission comply with "the scored submission is the validation-best checkpoint," or must the submitted checkpoint be literally the one selected on validation? Unlike an earlier draft of this addition, **do not freeze D8** over this — `tools/finalise.py`'s refit is already built and shipped; see the open question in Section 15 instead of blocking already-working code on an unconfirmed reading of the brief.
 
 ### 9.2 Workstream B: Data, features, and leakage defence
 **Owner: Malvika** · Files: `pipeline/data.py`, `pipeline/features.py`
@@ -816,6 +823,10 @@ class BaseModel(Protocol):
 | B6 | Leakage guard | B3 | `test_leakage.py`: a feature reading `target_df["click"]` rejected; a `FORBIDDEN_SAME_ROW` column of `target_df` rejected; `EXCLUDED_SOURCES` rejected; legitimate historical aggregates pass |
 | B7 | Negative sampling strategies | B1 | Three strategies (all, in_session, pop_weighted) selectable via config |
 | B8 | **Stretch:** randomised-exposure slice loader + IPS reweighting | B1, B6 | Slice separable; only pre-cutoff rows exposed; reweighting function documented with its assumptions |
+| B10 | Duration-bias feature pack: `video_duration`, `duration_bucket` (train-quantile groups, default 10, D2Q-style), `pcr_hist` (historical play_time/duration ratio aggregates per user and per video, train-only, with the existing time-decay + EB smoothing), `long_view_rate_by_duration_group` (target encoding of `long_view` within duration bucket, train-only, EB-smoothed). | B2, B3 | Each feature fits on train only and passes the existing leakage tests. Quantile bucket edges computed on train are reused unchanged for validation/test (assert no re-fitting). All four registered and callable by name. |
+| B11 | Auxiliary-signal historical rates: per-user and per-video past rates for `click`, `like`, `follow`, `long_view`, time-decayed and EB-smoothed, where the value for a row on date *t* uses only rows with date < *t*. | B2, B3 | `test_aux_rates.py` on synthetic data: a feature value never changes when future-dated rows are edited; same-day rows are excluded. Registered in the feature registry. |
+| B12 | Within-user variance screen. `screen.py` computes, for every registered feature, its mean within-user variance on the validation split. Features below threshold (default 1e-9) are flagged `metric_inert: true` — constant within user, hence invisible to GAUC/nDCG@5 except through interactions (5.3, trap re: pure user-side terms). The report feeds A10's prompt injection. | B2, B3, B10, B11 | `test_screen.py`: a pure user-level feature (e.g. `user_activity`) is flagged inert; a video-varying feature is not. Report file schema documented in Section 8 style. |
+| B13 | Data-usage checker. `data_usage.py` runs pre-flight: lists every data file shipped in the starter kit / KuaiRand download (user features, video features, both log files) and asserts each is either joined into the pipeline or explicitly listed in an `EXCLUDED = {...: reason}` map. | B1 | Running with a shipped file neither joined nor excluded exits non-zero and names the file. The exclusion map with reasons is printed into the run log (judge-visible). |
 
 **Note on B8:** highest-upside item in the project for Innovation scoring. Attempt only after B1 to B7 are green.
 
@@ -831,8 +842,10 @@ class BaseModel(Protocol):
 | C5 | DeepFM in PyTorch, pointwise | C1, B4 | Trains on CPU in under 10 min; early stopping patience 1; FM second-order term uses the O(n) identity |
 | C6 | Optuna with `MedianPruner` and SQLite storage | C1, B2 | A 20-trial study completes; pruning cuts total time by 30%+; study resumable after kill; objective evaluated on internal folds |
 | C7 | Blending per 6.9, four methods, `rank_avg` default | C1, D2 | Blend of two fixed nodes reproduces exactly; per-user Spearman reported; blend rejected unless it beats both parents on folds and official metric; weights fitted on internal folds only |
+| C8 | Within-user pairwise loss as a loss-drawer entry: BPR-style logistic pairwise loss with pairs drawn only within the same user, for the FM stack. Also, LightGBM LambdaRank `group` boundaries must equal user boundaries — the structural match between loss and the per-user metrics. | C1, C3 | **Mostly implemented.** `test_pairwise.py`: no training pair spans two users; BPR variant trains end-to-end through the standard `(user_ids, labels, scores)` interface. — `pipeline/models/fm.py` has `loss="pairwise"` (BPR sampled within-user via `_build_pair_index`/`_sample_pairs`), covered by `tests/test_models.py::test_fm_pairwise_*`: determinism, a "not a silent no-op" regression test, and the within-user-pairs guard. Confirm-tier check on real data: delta over baseline +0.0008, ~1σ of seed noise — a real result (not yet a proven win), see trap 13. LightGBM's `group` array is built from sorted user ids by construction (`lgbm.py::_group_order`), so boundaries can't diverge from users; a standalone "assertion fires on a deliberately mis-grouped input" test is not yet written. |
+| C9 | *(Stretch — only after C1–C8 green.)* Multi-task DeepFM: shared embedding table, auxiliary sigmoid heads for `click` and `like` with Optuna-tunable loss weights. Inference emits only the `long_view` head score. | C6 | **Not implemented.** Auxiliary heads affect training loss only; output shape/interface unchanged. One full train+eval ≤ 10 min CPU. With aux weights = 0, validation primary matches the single-task DeepFM within 0.001. — `deepfm_mtl` is registered in `MODEL_REGISTRY` but its constructor raises `NotImplementedError` (`pipeline/models/deepfm.py`), and `agent/schema.py`'s `Config` validator rejects it at proposal time so the loop doesn't burn an iteration discovering that. Building C9 for real requires removing `deepfm_mtl` from `UNIMPLEMENTED_MODELS` in `agent/schema.py` as part of the same change. |
 
-**Deprioritised:** multi-task DeepFM (rung 5) only if ahead of schedule. Sequence models (rung 6) not attempted. CatBoost optional.
+**Deprioritised:** multi-task DeepFM (rung 5, tracked as C9) only if ahead of schedule. Sequence models (rung 6) not attempted. CatBoost optional.
 
 ### 9.4 Workstream D: Integrity, statistics, reporting, demo
 **Owner: Pinxin** · Files: `pipeline/evaluate.py` (copy only), `agent/gate.py`, `agent/manifest.py`, `tools/*`, `README.md`, `agent/knowledge.md`
@@ -849,6 +862,9 @@ class BaseModel(Protocol):
 | D8 | `tools/finalise.py`: refit on train+val, 5 seeds, submission | C1, D1 | Refits the chosen config on the full permitted training period (train + validation) before predicting test; averages 5 seeds; `submit.py --check` passes; `row_id` alignment verified |
 | D9 | README, trajectory plot, Devpost writeup | D7, D8 | One-command startup verified from a clean clone; README covers overview, setup, reproduction, limitations, contributions, and the unresolved metric discrepancy |
 | D10 | *(Optional)* walkthrough video with injected-failure demo | D9 | See Section 14.2 |
+| D12 | Promotion-threshold correction (**amends 6.6's statistical gate — closes the noise-floor issue named in trap 5**). Accept requires BOTH: user-level bootstrap 95% CI of the primary-delta excludes 0, AND point delta ≥ 0.002 (= ε, ≈ 2.5σ of the baseline's 5-seed std 0.0008). | D2 | **Implemented, at the call site rather than in `gate.accept()` itself.** `test_gate.py`: synthetic +0.001 delta with tight CI is rejected (threshold), +0.004 with CI spanning 0 is rejected (noise), +0.004 with CI > 0 is accepted. — The frozen 8.8 contract for `gate.accept()` is untouched (it still returns the bootstrap-CI verdict alone); the combined rule lives in `agent/loop.py::_accept_full`, which requires both the CI check and `primary - max(baseline, incumbent) >= MIN_DELTA_FLOOR` before accepting a full-tier node, and records `gates`/`ci_95`/`delta_vs_best` on the node so the decision is auditable. `tests/test_loop.py` covers all three cases from this row's acceptance criteria by name. This closes a real incident: a run once accepted its first full node (primary 0.5837, *below* the shipped 0.6016 baseline) unconditionally and used it as the reference for the rest of the run. |
+| D13 | Leakage canary probes, pre-flight: (a) permute `long_view` labels within user on train, retrain the cheapest model — validation GAUC must land in 0.5 ± 0.02; (b) a deliberately leaky fixture feature (built from future `long_view`) must trip the alarm. Run once before iteration 1 and record the result in the run log. | B2, C2 | Both canaries implemented as pytest + a `--preflight` CLI mode. Injected leaky feature raises; clean pipeline passes. Preflight result appears in the run log header. |
+| D14 | Judge-visible reporting of the new machinery: run-log renderer shows, per iteration, the strike counter (A11), any `scheduler_forced` flag, the latest ablation sensitivity table (A10), citations (A12), and the metric-inert feature list (B12). Add the ablation table + solution tree to the demo script. | A10, A11, A12, B12, D7 | Rendered log for a 5-iteration mock run contains all five elements. Demo script section drafted with one screenshot placeholder per element. |
 
 **Pinxin also owns** the live Rich terminal view of the node tree. Roughly 40 lines, and it materially improves the demo over scrolling logs.
 
@@ -950,6 +966,8 @@ Ranked by severity. **Mandatory reading for all four.**
 
 12. **Retrofitting logs.** The run-log is a graded deliverable requiring per-iteration hypothesis, diff, metrics, and error events. Build the node schema on Day 1 or the data will not exist on Day 3.
 
+13. **Premature convergence on the first few tries.** The convergence rule (4.5: ε=0.002, N=3) checks only `full`/`confirm` nodes and can fire as early as the 4th one — right after the 3rd, if none improved on the 1st by more than ε. Observed for real: a run converged after exactly 4 full evaluations (the earliest mathematically possible point), having tried only one idea per family. This is not evidence the search space is dry — the plan already names the fix in 4.5 ("order the first full experiments by expected effect size... so the convergence rule does not fire on three low-value tweaks"), and A11's convergence-aware scheduler (a strike counter plus a forced hedge at strike 2) is the proposed follow-up, not yet built. Until then: don't read an early "converged" as a negative result on the whole space — read the individual full-tier deltas and their CIs (D12), and if a result looks ambiguous rather than clearly negative, re-run it at `confirm` tier (5 seeds) before concluding anything. A candidate with a positive point-delta but a CI straddling zero, averaged over 5 seeds, may resolve either way — that's a data point, not a guess.
+
 ---
 
 ## 12. Tech stack
@@ -1049,6 +1067,7 @@ Faster and far more convincing than hoping something breaks. Keep a recorded rep
 | Is a GPU available to anyone on the team? | All | Day 0 |
 | Hand-rolled PyTorch or RecBole? | Ethan | After probes, Day 1 evening |
 | Attempt bonus benchmarks (1k / 27k)? | All | Day 2 evening, default no |
+| Does refitting the validation-best config on train+validation before final submission comply with "the scored submission is the validation-best checkpoint," or must the submitted checkpoint be literally the one selected on validation? **Note:** the refit (D8) is already built and shipped in `tools/finalise.py` and used in the reproduction steps in `README.md`/`SETUP.md` — resolve this by confirming existing behaviour, not by freezing it unbuilt. | Pinxin | Before the final submission run |
 
 ---
 
@@ -1257,4 +1276,22 @@ Cite 2, 4 and 5 in the README at minimum. Innovation is explicitly scored on "or
 
 ---
 
-*Version 2.0, 28 August 2026. Update Section 6.7 ordering after the Day-1 probes and this document stays the single source of truth.*
+## Appendix D: Idea bank
+
+Feeds A12's propose prompt. Once A12 is built, move this table verbatim into `agent/prompts/idea_bank.md` and wire it into `propose()`'s system prompt (not done yet — this is source content for that task, not a description of current behaviour).
+
+| Idea | Drawer | Reference to cite | One-line why |
+|---|---|---|---|
+| Duration-quantile grouping / duration-normalized engagement features (B10) | features | D2Q — Zhan et al., KDD 2022 | Duration confounds watch-time labels; `long_view` is duration-derived |
+| Historical play-completion-ratio aggregates (B10) | features | PCR baseline family; CWM — Zhao et al., KDD 2024 (Appendix C ref. 4's neighbour in the same literature) | Completion behaviour predicts `long_view` beyond raw counts |
+| Auxiliary-signal historical rates (B11) | features | ESMM-style multi-feedback usage | 11 unscored signals carry information about the scored one |
+| Within-user pairwise / listwise objectives grouped by user (C8) | loss | BPR (Rendle 2009); LambdaRank | Structurally matched to per-user GAUC/nDCG@5. **C8 is mostly implemented** — see 9.3 |
+| Multi-task shared-embedding heads (C9) | model | ESMM / shared-bottom MTL | Densifies sparse `long_view` signal via shared representations. **C9 is not implemented** — see 9.3 |
+| Ablation-guided component targeting (A10) | (meta) | MLE-STAR — Yoon & Nam, NeurIPS 2025 | Evidence-driven choice of what to improve next |
+| Tree search over solutions, branch from global best | (meta) | AIDE — Jiang et al., 2025 (Appendix C ref. 2) | Already the A2/A7 design; cite it in the writeup |
+
+**Screened out (log these as considered-and-rejected — cheap Innovation points):** full CWM censored regression (`torch==1.6.0` dependency, heavy for the delta); MCTS à la ML-Master (overkill at 50 iterations); Recall@50 optimisation (≈0.999 for all models per the organisers — see 4.8 on the Recall@50/NDCG@10 prose being stale against the shipped `evaluate.py`).
+
+---
+
+*Version 2.1, 31 August 2026. Sections 9.1/9.2/9.3/9.4, 6.6, 11 (trap 13), 15, and Appendix D merged from `AGENT_PLAN_v2.1_ADDENDUM.md` — additive per that document's own rule; no Section 8 contract was changed. Update Section 6.7 ordering after the Day-1 probes and this document stays the single source of truth.*
