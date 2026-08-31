@@ -74,7 +74,27 @@ def _diff(action: Action) -> str:
     return f"{action.type}: model={action.config.model}, loss={action.config.loss}"
 
 
-def _node(action: Action, fidelity: str, result: dict, *, accepted: bool = False) -> dict:
+def _normalise_verdict(value: Any) -> dict:
+    """Accept either a bare bool or a full verdict dict from ``accept_fn``.
+
+    The loop's gate returns the evidence behind its decision (``gates``,
+    ``ci_95``, ``delta_vs_best``) so the node can record *why* it was
+    accepted, not just that it was. A plain bool stays valid — smoke/screen
+    callers and tests use it — and simply carries no evidence.
+    """
+    if isinstance(value, dict):
+        return {**value, "accepted": bool(value.get("accepted", False))}
+    return {"accepted": bool(value)}
+
+
+def _node(
+    action: Action,
+    fidelity: str,
+    result: dict,
+    *,
+    accepted: bool = False,
+    verdict: dict | None = None,
+) -> dict:
     """Translate C1's public result contract into the Section 8.7 node shape.
 
     ``val_scores``/``val_user_ids`` live only on ``result`` (C1's contract,
@@ -82,6 +102,13 @@ def _node(action: Action, fidelity: str, result: dict, *, accepted: bool = False
     never reach the persisted record. ``accepted`` must therefore be decided
     by the caller, on ``result``, before this conversion drops them; it is
     not computed here.
+
+    ``verdict`` carries the gate's supporting evidence into the three
+    Section 8.7 slots the ledger reserves for it. Without it those stay at
+    their store defaults (``{}``/``None``), which is what an ungated pilot
+    tier should look like — but a *full* run that leaves them empty is
+    indistinguishable from one that was never gated at all, which is exactly
+    how the previous run accepted a below-baseline node.
     """
     config = action.config.model_dump() if action.config is not None else {}
     node: dict[str, Any] = {
@@ -112,6 +139,12 @@ def _node(action: Action, fidelity: str, result: dict, *, accepted: bool = False
             segments=result.get("segments", {}),
             errors=[],
         )
+        if verdict is not None:
+            node.update(
+                gates=verdict.get("gates", {}),
+                ci_95=verdict.get("ci_95"),
+                delta_vs_best=verdict.get("delta_vs_best"),
+            )
     else:
         node.update(
             metrics={},
@@ -269,10 +302,11 @@ def execute(
 
     ``accept_fn``, when given, is called on the raw C1 result (which still
     carries ``val_scores``/``val_user_ids``) before it is converted to the
-    Section 8.7 node shape, since that conversion drops those fields. Its
-    return value becomes the persisted node's ``accepted`` field. Only called
-    on a successful result — the node schema forces ``accepted=False`` on any
-    error regardless.
+    Section 8.7 node shape, since that conversion drops those fields. It may
+    return a bare bool, or a verdict dict with ``accepted`` plus the
+    supporting ``gates``/``ci_95``/``delta_vs_best`` evidence, which is
+    recorded on the node. Only called on a successful result — the node
+    schema forces ``accepted=False`` on any error regardless.
     """
     started = time.monotonic()
     if isinstance(timeout_s, bool) or not isinstance(timeout_s, Real) or timeout_s <= 0:
@@ -314,10 +348,11 @@ def execute(
         # The node is the audited unit of work, so account for generated-code
         # setup and IPC as well as C1's model-training duration.
         result["seconds"] = time.monotonic() - started
-        accepted = False
+        verdict = None
         if accept_fn is not None and result.get("status") == "ok":
-            accepted = accept_fn(result)
-        return _node(action, fidelity, result, accepted=accepted)
+            verdict = _normalise_verdict(accept_fn(result))
+        accepted = bool(verdict["accepted"]) if verdict is not None else False
+        return _node(action, fidelity, result, accepted=accepted, verdict=verdict)
     except BaseException as exc:
         return _execution_error(
             action,
