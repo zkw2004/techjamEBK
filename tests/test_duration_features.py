@@ -1,9 +1,10 @@
-"""B10 acceptance (plus the B10-fix re-keying of pcr_hist): the
+"""B10 acceptance (plus the B10-fix completion-history features): the
 duration-bias feature pack.
 
 `video_duration`, `duration_bucket`, `pcr_hist`,
-`long_view_rate_by_duration_group` -- each fits on train_df only, passes
-the existing leakage guard, and (for the three quantile-bucketed
+`video_completion_ratio_hist`, `long_view_rate_by_duration_group` -- each
+fits on train_df only and passes the existing leakage guard. For the three
+quantile-bucketed
 features -- `duration_bucket`, `long_view_rate_by_duration_group`, and,
 since the B10-fix, `pcr_hist` itself) reuses train-fit bucket edges
 unchanged on validation/test rather than refitting them on the target
@@ -13,7 +14,9 @@ B10-fix: `pcr_hist` was re-keyed from a pure per-`user_id` aggregate to a
 per-`(user_id, duration_bucket)` aggregate after `tools/screen.py` (B12)
 measured it as `metric_inert` (mean within-user variance exactly 0.0) on
 the real validation split -- see `test_pcr_hist_varies_by_target_
-duration_bucket_for_same_user` below for the direct regression coverage.
+duration_bucket_for_same_user` below for the direct regression coverage. The
+remaining item-side direction is `video_completion_ratio_hist`: it aggregates
+duration-normalised completion history by candidate video.
 """
 
 from __future__ import annotations
@@ -30,6 +33,7 @@ from pipeline.features import (
     leakage_check,
     long_view_rate_by_duration_group,
     pcr_hist,
+    video_completion_ratio_hist,
     video_duration,
 )
 
@@ -37,11 +41,12 @@ NEW_FEATURE_NAMES = {
     "video_duration",
     "duration_bucket",
     "pcr_hist",
+    "video_completion_ratio_hist",
     "long_view_rate_by_duration_group",
 }
 
 
-def test_all_four_features_are_registered_and_callable_by_name():
+def test_all_duration_features_are_registered_and_callable_by_name():
     assert NEW_FEATURE_NAMES <= set(feature_module.FEATURES)
     for name in NEW_FEATURE_NAMES:
         assert callable(feature_module.get(name))
@@ -341,6 +346,79 @@ def test_pcr_hist_in_sample_requires_time_ms(duration_train_df):
         pcr_hist(duration_train_df, duration_train_df)
 
 
+# --- video_completion_ratio_hist (B10-fix item-side direction) ----------
+
+
+def test_video_completion_ratio_hist_varies_by_candidate_video_for_one_user():
+    """The per-video history must not be metric-inert within a user."""
+    train_df = pd.DataFrame(
+        {
+            "video_id": ["good", "good", "poor", "poor"],
+            "date": [20220409, 20220410, 20220411, 20220412],
+            "duration_ms": [10_000, 10_000, 10_000, 10_000],
+            "play_time_ms": [9_000, 8_000, 1_000, 2_000],
+        }
+    )
+    target_df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u1"],
+            "video_id": ["good", "poor", "unseen"],
+            "date": [20220422, 20220422, 20220422],
+        }
+    )
+
+    result = video_completion_ratio_hist(train_df, target_df)
+
+    assert result[0] > result[1]
+    assert result[0] != pytest.approx(result[1])
+    assert np.isfinite(result).all()
+    assert np.all((0.0 <= result) & (result <= 1.0))
+
+
+def test_video_completion_ratio_hist_ignores_target_outcomes(
+    duration_train_df, duration_target_df
+):
+    changed = duration_target_df.copy()
+    changed["long_view"] = 1 - changed["long_view"]
+    changed["is_click"] = 1 - changed["is_click"]
+    changed["play_time_ms"] = 999_999
+
+    original = video_completion_ratio_hist(duration_train_df, duration_target_df)
+    after = video_completion_ratio_hist(duration_train_df, changed)
+
+    np.testing.assert_array_equal(original, after)
+
+
+def test_video_completion_ratio_hist_in_sample_is_strictly_prior():
+    frame = pd.DataFrame(
+        {
+            "video_id": ["v1", "v2", "v1", "v1"],
+            "date": [20220408] * 4,
+            "time_ms": [100, 200, 300, 300],
+            "duration_ms": [10_000] * 4,
+            "play_time_ms": [10_000, 0, 0, 10_000],
+        }
+    )
+    changed_same_time = frame.copy()
+    changed_same_time.loc[3, "play_time_ms"] = 0
+
+    result = video_completion_ratio_hist(frame, frame)
+    changed = video_completion_ratio_hist(changed_same_time, changed_same_time)
+
+    # The first event has no history. The two rows at time 300 must not see
+    # each other, so changing one cannot alter the other's derived history.
+    assert result[0] == pytest.approx(0.5)
+    np.testing.assert_allclose(result[:3], changed[:3])
+
+
+def test_video_completion_ratio_hist_rejects_overlapping_target_window(
+    duration_train_df, duration_target_df
+):
+    overlapping = duration_target_df.assign(date=duration_train_df["date"].max())
+    with pytest.raises(ValueError, match="strictly earlier"):
+        video_completion_ratio_hist(duration_train_df, overlapping)
+
+
 # --- long_view_rate_by_duration_group -------------------------------------
 
 
@@ -457,6 +535,12 @@ def test_pcr_hist_passes_leakage_check_cross_frame(duration_train_df, duration_t
     assert leakage_check(pcr_hist, duration_train_df, duration_target_df) is True
 
 
+def test_video_completion_ratio_hist_passes_leakage_check_cross_frame(
+    duration_train_df, duration_target_df
+):
+    assert leakage_check(video_completion_ratio_hist, duration_train_df, duration_target_df) is True
+
+
 def test_long_view_rate_by_duration_group_passes_leakage_check_cross_frame(
     duration_train_df, duration_target_df
 ):
@@ -471,18 +555,26 @@ def duration_in_sample_frame() -> pd.DataFrame:
     return pd.DataFrame(
         {
             "user_id": ["u1", "u1", "u2"],
+            "video_id": ["v1", "v2", "v1"],
             "duration_ms": [5000, 5000, 15000],
             "play_time_ms": [2500, 5000, 7500],
             "long_view": [1, 0, 1],
             "time_ms": [100, 200, 300],
+            "date": [20220409, 20220409, 20220409],
         }
     )
 
 
-def test_pcr_hist_and_duration_group_rate_pass_leakage_check_in_sample(
+def test_duration_history_features_pass_leakage_check_in_sample(
     duration_in_sample_frame,
 ):
     assert leakage_check(pcr_hist, duration_in_sample_frame, duration_in_sample_frame) is True
+    assert (
+        leakage_check(
+            video_completion_ratio_hist, duration_in_sample_frame, duration_in_sample_frame
+        )
+        is True
+    )
     assert (
         leakage_check(
             long_view_rate_by_duration_group, duration_in_sample_frame, duration_in_sample_frame

@@ -145,6 +145,35 @@ def test_screen_feature_does_not_flag_a_within_user_varying_feature():
     assert result["mean_within_user_variance"] > DEFAULT_THRESHOLD
 
 
+def test_screen_feature_does_not_flag_video_completion_history_as_inert():
+    """B10-fix is candidate-varying by construction, not a user scalar."""
+    from pipeline.features import video_completion_ratio_hist
+
+    train_df = pd.DataFrame(
+        {
+            "video_id": ["good", "good", "poor", "poor"],
+            "date": [20220409, 20220410, 20220411, 20220412],
+            "duration_ms": [10_000, 10_000, 10_000, 10_000],
+            "play_time_ms": [9_000, 8_000, 1_000, 2_000],
+        }
+    )
+    val_df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1"],
+            "video_id": ["good", "poor"],
+            "date": [20220422, 20220422],
+        }
+    )
+
+    result = screen_feature(
+        "video_completion_ratio_hist", video_completion_ratio_hist, train_df, val_df
+    )
+
+    assert result["status"] == "ok"
+    assert result["metric_inert"] is False
+    assert result["mean_within_user_variance"] > DEFAULT_THRESHOLD
+
+
 def test_screen_feature_respects_a_custom_threshold():
     val_df = _val_df(["u1", "u1"])
 
