@@ -155,6 +155,12 @@ failed or metric-less attempts remain in the ledger and are never interpolated
 into the chart. A submission-ready project narrative is maintained in
 [DEVPOST.md](DEVPOST.md).
 
+During an unattended run, open a second terminal for the live experiment tree:
+
+```bash
+python -m tools.live --watch
+```
+
 After the statistical gate accepts a full-fidelity winner, create the final
 test submission. This refits the chosen configuration on the permitted
 `train + validation` period, averages exactly five seeds, preserves the
