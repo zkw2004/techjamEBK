@@ -21,6 +21,9 @@ BASELINE_VALIDATION = 0.6016
 BASELINE_TEST = 0.5946
 PILOT_FIDELITIES = {"smoke", "screen"}
 FULL_FIDELITIES = {"full", "confirm"}
+DEFAULT_TRAJECTORY = Path("artifacts/trajectory.png")
+DEFAULT_MARKDOWN_REPORT = Path("artifacts/experiment-report.md")
+DEFAULT_JSON_REPORT = Path("artifacts/experiment-report.json")
 
 
 def load_nodes(nodes_dir: Path) -> list[dict[str, Any]]:
@@ -150,13 +153,113 @@ def render_markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def plot_trajectory(
+    nodes: list[dict[str, Any]], output_path: Path | str = DEFAULT_TRAJECTORY
+) -> Path:
+    """Plot measured primary scores in ledger order without filling missing runs."""
+    import matplotlib.pyplot as plt
+
+    measured = []
+    for index, node in enumerate(nodes, start=1):
+        metrics = node.get("metrics") if isinstance(node.get("metrics"), dict) else {}
+        primary = metrics.get("primary")
+        if isinstance(primary, (int, float)):
+            measured.append((index, str(node.get("id", f"node-{index}")), float(primary), node))
+
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(9, 4.8))
+    axis.axhline(
+        BASELINE_VALIDATION,
+        color="#777777",
+        linestyle="--",
+        linewidth=1.2,
+        label=f"official validation baseline ({BASELINE_VALIDATION:.4f})",
+    )
+    if measured:
+        x = [item[0] for item in measured]
+        y = [item[2] for item in measured]
+        axis.plot(x, y, color="#2f6fed", linewidth=1.5, alpha=0.75, label="all measured nodes")
+        accepted = [item for item in measured if item[3].get("accepted")]
+        rejected = [item for item in measured if not item[3].get("accepted")]
+        if rejected:
+            axis.scatter(
+                [item[0] for item in rejected], [item[2] for item in rejected],
+                color="#8b95a5", marker="o", s=34, label="not accepted", zorder=3,
+            )
+        if accepted:
+            axis.scatter(
+                [item[0] for item in accepted], [item[2] for item in accepted],
+                color="#1a9c55", marker="D", s=48, label="accepted", zorder=4,
+            )
+        axis.set_xticks(x, [item[1] for item in measured], rotation=45, ha="right")
+    else:
+        axis.text(
+            0.5, 0.5, "No node metrics recorded yet", ha="center", va="center",
+            transform=axis.transAxes,
+        )
+        axis.set_xticks([])
+    axis.set_title("Validation primary trajectory")
+    axis.set_xlabel("Append-only node order")
+    axis.set_ylabel("Primary = mean(GAUC, nDCG@5)")
+    axis.grid(axis="y", alpha=0.2)
+    axis.legend(loc="best")
+    figure.tight_layout()
+    figure.savefig(destination, dpi=160)
+    plt.close(figure)
+    return destination
+
+
+def write_reports(
+    report: dict[str, Any],
+    *,
+    markdown_path: Path | str | None = None,
+    json_path: Path | str | None = None,
+) -> list[Path]:
+    """Write requested report formats and return their destination paths."""
+    written: list[Path] = []
+    for requested, content in (
+        (markdown_path, render_markdown(report)),
+        (json_path, json.dumps(report, indent=2) + "\n"),
+    ):
+        if requested is None:
+            continue
+        destination = Path(requested)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        written.append(destination)
+    return written
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nodes-dir", type=Path, default=Path("logs/nodes"))
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    parser.add_argument(
+        "--trajectory", type=Path,
+        help=f"also write the D9 trajectory plot (recommended: {DEFAULT_TRAJECTORY})",
+    )
+    parser.add_argument(
+        "--markdown-output", type=Path,
+        help=f"write the Markdown report (recommended: {DEFAULT_MARKDOWN_REPORT})",
+    )
+    parser.add_argument(
+        "--json-output", type=Path,
+        help=f"write the JSON report (recommended: {DEFAULT_JSON_REPORT})",
+    )
     args = parser.parse_args(argv)
-    report = build_report(load_nodes(args.nodes_dir))
+    nodes = load_nodes(args.nodes_dir)
+    report = build_report(nodes)
     print(json.dumps(report, indent=2) if args.json else render_markdown(report), end="")
+    for destination in write_reports(
+        report,
+        markdown_path=args.markdown_output,
+        json_path=args.json_output,
+    ):
+        print(f"Report: {destination}")
+    if args.trajectory:
+        destination = plot_trajectory(nodes, args.trajectory)
+        print(f"Trajectory plot: {destination}")
 
 
 if __name__ == "__main__":

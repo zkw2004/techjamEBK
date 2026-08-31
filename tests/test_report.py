@@ -4,7 +4,13 @@ import json
 
 import pytest
 
-from tools.report import build_report, load_nodes, render_markdown
+from tools.report import (
+    build_report,
+    load_nodes,
+    plot_trajectory,
+    render_markdown,
+    write_reports,
+)
 
 
 def _write_node(directory, node):
@@ -65,3 +71,26 @@ def test_report_rejects_a_malformed_node(tmp_path):
     (nodes_dir / "n001.json").write_text("not json", encoding="utf-8")
     with pytest.raises(ValueError, match="cannot read node record"):
         load_nodes(nodes_dir)
+
+
+def test_trajectory_plot_is_generated_from_measured_nodes(tmp_path):
+    nodes = [
+        {"id": "n001", "metrics": {"primary": 0.59}, "accepted": False},
+        {"id": "n002", "metrics": {}, "accepted": False},
+        {"id": "n003", "metrics": {"primary": 0.61}, "accepted": True},
+    ]
+    output = plot_trajectory(nodes, tmp_path / "trajectory.png")
+    assert output.is_file()
+    assert output.stat().st_size > 1_000
+
+
+def test_report_files_are_written_in_both_formats(tmp_path):
+    report = build_report([])
+    markdown = tmp_path / "nested" / "report.md"
+    machine = tmp_path / "nested" / "report.json"
+
+    written = write_reports(report, markdown_path=markdown, json_path=machine)
+
+    assert written == [markdown, machine]
+    assert markdown.read_text(encoding="utf-8").startswith("# Experiment report")
+    assert json.loads(machine.read_text(encoding="utf-8"))["totals"]["nodes"] == 0
