@@ -41,6 +41,24 @@ This does not allocate dangerous amounts of memory. It injects a controlled
 policy, shows the logged `oom → retry` event, and renders the linked successful
 node at `batch_size=4096`. The behavior is covered by an automated test.
 
+## D14 evidence screenshots
+
+Capture these frames from the generated report and live view; each placeholder
+must be replaced with the named real screen before recording:
+
+1. `[SCREENSHOT: report header — median 4 candidates/user and 57.8% GAUC-usable]`
+2. `[SCREENSHOT: controller table — strike counter and scheduler_forced hedge]`
+3. `[SCREENSHOT: latest ablation sensitivity table]`
+4. `[SCREENSHOT: cited hypothesis and metric-inert feature list]`
+5. `[SCREENSHOT: Rich solution tree — accepted, rejected, failure and recovery nodes]`
+
+Regenerate the evidence immediately before capture:
+
+```bash
+make report
+python -m tools.live
+```
+
 ## Final checks
 
 - Replace any example node ID with the actual accepted full/confirm winner.

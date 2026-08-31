@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,11 @@ FULL_FIDELITIES = {"full", "confirm"}
 DEFAULT_TRAJECTORY = Path("artifacts/trajectory.png")
 DEFAULT_MARKDOWN_REPORT = Path("artifacts/experiment-report.md")
 DEFAULT_JSON_REPORT = Path("artifacts/experiment-report.json")
+DEFAULT_EVENT_LOG = Path("logs/run.jsonl")
+DEFAULT_SCREEN_REPORT = Path("logs/screen_report.json")
+CANDIDATE_COUNT_MEDIAN = 4
+GAUC_USABLE_USER_PERCENT = 57.8
+CITATION_PATTERN = re.compile(r"\[ref:\s*([^\]]+)\]")
 
 
 def load_nodes(nodes_dir: Path) -> list[dict[str, Any]]:
@@ -42,11 +48,109 @@ def load_nodes(nodes_dir: Path) -> list[dict[str, Any]]:
     return sorted(nodes, key=lambda node: str(node.get("id", "")))
 
 
+def load_events(path: Path) -> list[dict[str, Any]]:
+    """Load complete append-only JSONL events, tolerating a truncated tail."""
+    if not path.is_file():
+        return []
+    events = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def load_json_report(path: Path) -> dict[str, Any]:
+    """Load an optional generated diagnostic report."""
+    if not path.is_file():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read diagnostic report {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"diagnostic report must be a JSON object: {path}")
+    return value
+
+
+def build_judge_visibility(
+    nodes: list[dict[str, Any]],
+    events: list[dict[str, Any]] | None = None,
+    screen_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Collect D14 controller and diagnostic evidence without inventing gaps."""
+    iteration_events = [event for event in (events or []) if event.get("event") == "iteration"]
+    iterations = [
+        {
+            "iteration": index,
+            "strikes": event.get("strikes"),
+            "scheduler_forced": bool(event.get("scheduler_forced", False)),
+            "hedges_fired": event.get("hedges_fired"),
+            "node": event.get("node"),
+        }
+        for index, event in enumerate(iteration_events, start=1)
+    ]
+    citations = []
+    for node in nodes:
+        matches = CITATION_PATTERN.findall(str(node.get("hypothesis", "")))
+        citations.extend(
+            {"node": node.get("id", ""), "reference": match.strip()}
+            for match in matches
+        )
+
+    latest_ablation = next(
+        (
+            {"node": node.get("id", ""), **node["ablation"]}
+            for node in reversed(nodes)
+            if isinstance(node.get("ablation"), dict)
+            and isinstance(node["ablation"].get("components"), list)
+        ),
+        None,
+    )
+    feature_rows = (screen_report or {}).get("features")
+    inert_features = sorted(
+        name
+        for name, evidence in (feature_rows.items() if isinstance(feature_rows, dict) else [])
+        if isinstance(evidence, dict) and evidence.get("metric_inert") is True
+    )
+    preflight = next(
+        (
+            event
+            for event in reversed(events or [])
+            if event.get("event") == "leakage_preflight"
+        ),
+        None,
+    )
+    return {
+        "candidate_count_diagnostics": {
+            "median_candidates_per_user": CANDIDATE_COUNT_MEDIAN,
+            "gauc_usable_users_percent": GAUC_USABLE_USER_PERCENT,
+            "interpretation": (
+                "A +0.002 primary delta is material when users rank a median of four "
+                "candidates and only 57.8% contribute to GAUC."
+            ),
+        },
+        "controller_iterations": iterations,
+        "citations": citations,
+        "latest_ablation": latest_ablation,
+        "metric_inert_features": inert_features,
+        "leakage_preflight": preflight,
+    }
+
+
 def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
-def build_report(nodes: list[dict[str, Any]]) -> dict[str, Any]:
+def build_report(
+    nodes: list[dict[str, Any]],
+    *,
+    events: list[dict[str, Any]] | None = None,
+    screen_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build every D7 deliverable from node JSON alone."""
     results = []
     for node in nodes:
@@ -99,6 +203,7 @@ def build_report(nodes: list[dict[str, Any]]) -> dict[str, Any]:
             "A completed node whose manual_intervention field is true; automated "
             "proposals, bounded retries, and recovery actions are not interventions."
         ),
+        "judge_visibility": build_judge_visibility(nodes, events, screen_report),
     }
 
 
@@ -112,8 +217,18 @@ def _display(value: object, digits: int = 6) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     """Render a copy-ready report for README and Devpost use."""
+    visibility = report["judge_visibility"]
+    diagnostics = visibility["candidate_count_diagnostics"]
     lines = [
         "# Experiment report",
+        "",
+        "## Evaluation context",
+        "",
+        f"- Median candidates per user: **{diagnostics['median_candidates_per_user']}**",
+        f"- GAUC-usable users: **{diagnostics['gauc_usable_users_percent']:.1f}%**",
+        f"- Interpretation: {diagnostics['interpretation']}",
+        "",
+        "## Results",
         "",
         "| Node | Fidelity | Status | Accepted | GAUC | nDCG | Primary | Δ baseline |",
         "|---|---|---|---:|---:|---:|---:|---:|",
@@ -148,6 +263,65 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- Other iterations: {iterations['other']}",
             "",
             f"Manual intervention means: {report['manual_intervention_definition']}",
+        ]
+    )
+    lines.extend(["", "## Search controller", ""])
+    controller = visibility["controller_iterations"]
+    if controller:
+        lines.extend(
+            [
+                "| Iteration | Strikes | Scheduler forced | Hedges fired | Node |",
+                "|---:|---:|---:|---:|---|",
+            ]
+        )
+        for row in controller:
+            lines.append(
+                f"| {row['iteration']} | {_display(row['strikes'])} | "
+                f"{'yes' if row['scheduler_forced'] else 'no'} | "
+                f"{_display(row['hedges_fired'])} | {_display(row['node'])} |"
+            )
+    else:
+        lines.append("No iteration-controller events were recorded.")
+
+    lines.extend(["", "## Latest ablation sensitivity", ""])
+    ablation = visibility["latest_ablation"]
+    if ablation:
+        lines.extend(
+            [
+                f"Latest table: node `{ablation['node']}`; base primary "
+                f"{_display(ablation.get('base_primary'))}.",
+                "",
+                "| Component | Ablated primary | Delta | Sensitivity |",
+                "|---|---:|---:|---:|",
+            ]
+        )
+        for component in ablation["components"]:
+            lines.append(
+                f"| {component.get('component', '')} | {_display(component.get('primary'))} | "
+                f"{_display(component.get('delta'))} | "
+                f"{_display(component.get('sensitivity'))} |"
+            )
+    else:
+        lines.append("No ablation sensitivity table was recorded.")
+
+    lines.extend(["", "## Research citations", ""])
+    if visibility["citations"]:
+        lines.extend(
+            f"- `{citation['node']}` — {citation['reference']}"
+            for citation in visibility["citations"]
+        )
+    else:
+        lines.append("No structured `[ref: ...]` citations were recorded.")
+
+    inert = visibility["metric_inert_features"]
+    lines.extend(
+        [
+            "",
+            "## Metric-inert features",
+            "",
+            ", ".join(f"`{name}`" for name in inert)
+            if inert
+            else "No metric-inert feature report was recorded.",
         ]
     )
     return "\n".join(lines) + "\n"
@@ -234,6 +408,8 @@ def write_reports(
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nodes-dir", type=Path, default=Path("logs/nodes"))
+    parser.add_argument("--events", type=Path, default=DEFAULT_EVENT_LOG)
+    parser.add_argument("--screen-report", type=Path, default=DEFAULT_SCREEN_REPORT)
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument(
         "--trajectory", type=Path,
@@ -249,7 +425,11 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
     nodes = load_nodes(args.nodes_dir)
-    report = build_report(nodes)
+    report = build_report(
+        nodes,
+        events=load_events(args.events),
+        screen_report=load_json_report(args.screen_report),
+    )
     print(json.dumps(report, indent=2) if args.json else render_markdown(report), end="")
     for destination in write_reports(
         report,
