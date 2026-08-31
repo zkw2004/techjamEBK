@@ -612,3 +612,49 @@ def test_c9_real_run_experiment_smoke_completes_end_to_end():
     )
 
     assert result["status"] == "ok"
+
+
+# --- epoch budget --------------------------------------------------------
+
+def test_deepfm_default_epoch_budget_allows_convergence():
+    """The default must let the model reach its optimum, not stop at 7% of it.
+
+    Pins the *effect*, not the constant: this fixture needs well over three
+    epochs at the default learning rate, so the old `max_epochs=3` default
+    fails it while any budget large enough to converge passes. Measured on the
+    real split, folds pinned to the cap at 3/10/25 epochs and only stopped on
+    their own at 35-41 -- costing ~0.019 primary per fold. See the measurement
+    table in DeepFMModel.__init__ and trap 11.
+    """
+    rows, labels = [], []
+    for user in range(60):
+        for item in range(8):
+            rows.append([f"u{user}", f"v{item}", f"a{item % 4}", f"t{user % 3}",
+                         str(item % 5)])
+            labels.append(float(item % 2))
+    X = np.asarray(rows, dtype=object)
+    y = np.asarray(labels, dtype=float)
+    kwargs = dict(emb_dim=8, mlp=(16,), dropout=0.0, lr=0.001, batch_size=32, seed=3)
+
+    starved = DeepFMModel(max_epochs=3, **kwargs)
+    starved.fit(X, y, X, y, groups=(X[:, 0], X[:, 0]))
+    default = DeepFMModel(**kwargs)
+    default.fit(X, y, X, y, groups=(X[:, 0], X[:, 0]))
+
+    def separation(model):
+        scores = model.predict(X)
+        return float(scores[y == 1].mean() - scores[y == 0].mean())
+
+    assert starved.best_epoch == 3, "fixture must be capped at the old default"
+    assert default.best_epoch > 3, "the default budget must allow more training"
+    assert separation(default) > separation(starved)
+
+
+def test_deepfm_accepts_a_patience_above_one_but_still_defaults_to_one():
+    """The lock on patience==1 is lifted so C6/Optuna can explore it; the
+    default is unchanged, since the measurement shows patience=1 is not what
+    was cutting training short."""
+    assert DeepFMModel().patience == 1
+    assert DeepFMModel(patience=4).patience == 4
+    with pytest.raises(ValueError, match="patience must be at least 1"):
+        DeepFMModel(patience=0)

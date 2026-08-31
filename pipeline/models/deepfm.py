@@ -227,7 +227,24 @@ class DeepFMModel:
         dropout: float = 0.2,
         lr: float = 0.001,
         l2: float = 1e-6,
-        max_epochs: int = 3,
+        # 40, matching FM, because that is where this model actually converges
+        # -- not a guess. Measured on the real split via `_score_folds`, which
+        # is what chooses the refit budget in `_run_full`:
+        #
+        #   cap   3 -> best_epochs [ 3,  3,  3]  folds [0.5530, 0.5276, 0.5234]
+        #   cap  10 -> best_epochs [10, 10, 10]  folds [0.5652, 0.5377, 0.5332]
+        #   cap  25 -> best_epochs [25, 25, 25]  folds [0.5716, 0.5465, 0.5391]
+        #   cap  50 -> best_epochs [41, 40, 35]  folds [0.5751, 0.5508, 0.5419]
+        #   cap 100 -> best_epochs [41, 40, 35]  folds [0.5751, 0.5508, 0.5419]
+        #
+        # Every fold pinned to the cap until 50, and caps 50 and 100 agree
+        # exactly, so 35-41 is real convergence rather than another ceiling.
+        # The old default of 3 stopped training at ~7% of what the model needed
+        # and cost roughly 0.019 primary per fold. It came from trap 11's "CTR
+        # models at this scale peak after 1 to 3 epochs then degrade", which
+        # this measurement contradicts for this model -- validation loss fell
+        # monotonically for ~40 epochs and patience never fired. See trap 11.
+        max_epochs: int = 40,
         batch_size: int = 4096,
         patience: int = 1,
         seed: int = 42,
@@ -240,8 +257,17 @@ class DeepFMModel:
     ):
         if emb_dim <= 0 or lr <= 0 or l2 < 0:
             raise ValueError("emb_dim and lr must be positive and l2 must be non-negative")
-        if max_epochs <= 0 or batch_size <= 0 or patience != 1 or num_threads <= 0:
-            raise ValueError("epochs, batch size, and threads must be positive; patience must be 1")
+        # patience was hard-locked to exactly 1 on trap 11's premise. The
+        # measurement above shows early stopping firing at 35-41 epochs, well
+        # short of the cap, so patience=1 is not stopping this model
+        # prematurely and stays the default. The lock itself is lifted: it also
+        # prevented C6/Optuna from ever exploring the parameter, and there is no
+        # principled reason to forbid a longer wait on a noisier loss curve.
+        if max_epochs <= 0 or batch_size <= 0 or patience < 1 or num_threads <= 0:
+            raise ValueError(
+                "epochs, batch size, and threads must be positive; "
+                "patience must be at least 1"
+            )
         if not mlp or any(int(size) <= 0 for size in mlp):
             raise ValueError("mlp must contain positive hidden dimensions")
         if not 0 <= dropout < 1:
