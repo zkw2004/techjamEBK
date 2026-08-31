@@ -741,36 +741,80 @@ def _in_sample_pcr(train_df) -> np.ndarray:
     binary label to the continuous completion ratio: strictly-prior sum
     over `_prior_group_stats`, divided by strictly-prior count, falling
     back to the strictly-prior running mean ratio (`_prior_global_rates`)
-    for a user's first-ever row. Time-decay is intentionally not applied
-    here, unlike the cross-frame branch of `pcr_hist` below -- none of the
-    existing in-sample helpers (`_in_sample_group_rate`,
-    `_in_sample_user_tag_affinity`) decay either, and this path only ever
-    runs while `pipeline/train.py::_matrix` builds the training design
-    matrix itself, never for out-of-sample scoring of validation/test rows.
+    for a user's first-ever row in a given duration bucket. Grouped on the
+    composite `["user_id", "_duration_bucket"]` key -- see `pcr_hist`'s
+    docstring for why -- rather than `user_id` alone. Bucket edges are fit
+    on the full `train_df["duration_ms"]` distribution via
+    `_duration_bucket_edges`, which is safe even though that spans rows
+    past a given row's own `time_ms`: `duration_ms` is a static,
+    pre-exposure video property carrying no outcome information (the same
+    reasoning `duration_bucket`/`_in_sample_duration_group_rate`
+    document). Only the completion-ratio RATE within each `(user,
+    bucket)` cell must stay strictly historical, and that part still goes
+    through `_prior_group_stats`/`_prior_global_rates`. Time-decay is
+    intentionally not applied here, unlike the cross-frame branch of
+    `pcr_hist` below -- none of the existing in-sample helpers
+    (`_in_sample_group_rate`, `_in_sample_user_tag_affinity`) decay
+    either, and this path only ever runs while
+    `pipeline/train.py::_matrix` builds the training design matrix
+    itself, never for out-of-sample scoring of validation/test rows.
     """
     ratio = _completion_ratio(train_df)
     times = _event_times(train_df)
     global_rates = _prior_global_rates(ratio, times)
-    prior_sum, prior_count = _prior_group_stats(train_df, ratio, times, ["user_id"])
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    buckets = _apply_duration_buckets(train_df, edges)
+    frame_with_bucket = train_df.assign(_duration_bucket=buckets)
+    prior_sum, prior_count = _prior_group_stats(
+        frame_with_bucket, ratio, times, ["user_id", "_duration_bucket"]
+    )
     return np.divide(prior_sum, prior_count, out=global_rates, where=prior_count > 0)
 
 
 @feature("pcr_hist")
 def pcr_hist(train_df, target_df) -> np.ndarray:
-    """Time-decayed, EB-smoothed historical play-completion ratio per user.
+    """Time-decayed, EB-smoothed historical play-completion ratio per user,
+    conditioned on the TARGET row's own duration bucket.
 
-    Design decision (B10), resolving a genuine ambiguity in AGENT_PLAN.md
-    Section 9.2: the plan names one feature, `pcr_hist`, described as
-    "historical play_time/duration ratio aggregates per user AND per
-    video" -- but that same row caps the pack at "all four registered"
-    features total, which leaves room for exactly one `pcr_hist` signal,
-    not two. This implementation picks USER-level completion-ratio
-    history, mirroring `user_ctr_decayed`'s exact shape (decay cutoff =
-    train max date, helper-default alpha/half-life) but aggregating the
-    per-row completion ratio from `_completion_ratio` instead of the
-    binary `long_view` label. A video-level twin (e.g. `video_pcr_hist`)
-    is a natural, obvious follow-up outside this task's four-feature
-    scope and is not attempted here.
+    Fix (B10-fix), replacing the original per-`user_id`-only design: a
+    real run of `tools/screen.py` (B12) against the actual dataset flagged
+    this feature `metric_inert: true` with a mean within-user variance of
+    exactly `0.0`. That was structural, not a fluke -- as a pure per-user
+    scalar, `pcr_hist` held one number per user, identical across every
+    row that user appears in, so it could never move that user's own
+    ranking (GAUC/nDCG@5 are computed strictly within one user's own
+    impression list, per Section 5.3; see also `long_view_rate_by_
+    duration_group`'s duration-bucket conditioning, which is the direct
+    precedent for the fix applied here).
+
+    New semantics: instead of "this user's overall completion tendency",
+    this is now "this user's historical completion tendency specifically
+    for videos of about the target row's own length" -- a genuine user x
+    item-duration interaction. Grouping is on the composite key
+    `["user_id", "_duration_bucket"]` rather than `"user_id"` alone (the
+    closest existing precedent for this composite-key-with-global-rate-
+    fallback shape is `user_tag_affinity` above). Concretely: `train_df`
+    is bucketed via the same `_duration_bucket_edges`/`_apply_duration_
+    buckets` helpers `duration_bucket`/`long_view_rate_by_duration_group`
+    already use (so all three duration-aware features share identical
+    edges by construction, preserving B10's no-refit acceptance property:
+    edges are fit on `train_df` only and reused unchanged for
+    `target_df`); `target_df`'s OWN duration is bucketed with those same
+    edges to pick which `(user, bucket)` cell each target row's rate is
+    read from. Unseen `(user, bucket)` cells fall back to the plain
+    `global_rate` via `eb_smooth`'s existing alpha shrinkage -- the same
+    single-layer fallback pattern already used everywhere else in this
+    file; no second hierarchical fallback (e.g. an intermediate per-user
+    or per-bucket-only rate) is added, since sparse cells are already
+    handled reasonably by EB shrinkage and the acceptance criteria do not
+    call for more.
+
+    This is still a USER-anchored feature (not a new video-level
+    feature): the ambiguity this docstring previously resolved --
+    AGENT_PLAN.md Section 9.2 naming one `pcr_hist` signal while
+    describing "per user AND per video" aggregates, with the four-feature
+    cap leaving room for only one -- is unaffected by this fix. A
+    video-level twin remains a natural, unattempted follow-up.
 
     `_assert_historical_cutoff` fails closed on the (train_df, target_df)
     application path; the `train_df is target_df` case (used by
@@ -787,20 +831,29 @@ def pcr_hist(train_df, target_df) -> np.ndarray:
     if dates.isna().any():
         raise ValueError("pcr_hist requires valid training dates")
 
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    train_buckets = _apply_duration_buckets(train_df, edges)
+
     weights = decay_weights(dates, dates.max())
     fitting_rows = pd.DataFrame(
         {
             "user_id": train_df["user_id"].to_numpy(),
+            "_duration_bucket": train_buckets,
             "_weighted_ratio": weights * ratio.to_numpy(),
             "_weight": weights,
         }
     )
-    grouped = fitting_rows.groupby("user_id", sort=False)
+    grouped = fitting_rows.groupby(["user_id", "_duration_bucket"], sort=False)
     weighted_ratio = grouped["_weighted_ratio"].sum()
     effective_impressions = grouped["_weight"].sum()
     global_rate = float(ratio.mean())
     rates = eb_smooth(weighted_ratio, effective_impressions, global_rate)
-    return target_df["user_id"].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
+
+    target_buckets = _apply_duration_buckets(target_df, edges)
+    target_keys = pd.MultiIndex.from_arrays(
+        [target_df["user_id"].to_numpy(), target_buckets], names=["user_id", "_duration_bucket"]
+    )
+    return rates.reindex(target_keys).fillna(global_rate).to_numpy(dtype=np.float64)
 
 
 def _in_sample_duration_group_rate(train_df) -> np.ndarray:
