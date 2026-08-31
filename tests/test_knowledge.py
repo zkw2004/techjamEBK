@@ -37,3 +37,13 @@ def test_leakage_rules_and_feature_policy_are_emphasised():
     assert "**Never use a same-row post-exposure signal as an input feature.**" in text
     assert "**Never fit on the official validation window**" in text
     assert "| Column | As input feature (same row) |" in text
+
+
+def test_b14_prior_is_specific_without_discouraging_new_candidate_features():
+    text = KNOWLEDGE.read_text(encoding="utf-8")
+
+    assert "boundary, not a verdict" in text
+    assert "candidate-varying" in text
+    assert "video_completion_ratio_hist" in text
+    assert "B14's specific `sim_to_history` implementation" in text
+    assert "does **not** prove every possible user-history encoding" in text
