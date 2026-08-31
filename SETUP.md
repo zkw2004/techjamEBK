@@ -96,6 +96,20 @@ Useful flags:
 
 The run requires a real `ANTHROPIC_API_KEY` unless `--fake-provider` is set.
 
+### What happens first
+
+Before iteration 1 the loop runs the **official FM baseline** (all five
+fields, k=16, lr=0.001) once and records it as `n001`, marked
+`gates.baseline_anchor: true`. This takes about a minute and is the reference
+every later candidate is measured against: a candidate is accepted only if it
+beats `max(0.6016, best accepted)` by at least 0.002 **and** its bootstrap CI
+excludes zero. A resumed run skips it, since the ledger already has one.
+
+Worth knowing when reading the log: most candidates are *supposed* to be
+rejected. A screen candidate is only promoted to a full evaluation if it beats
+the incumbent measured at the same budget, so seeing many smoke/screen nodes
+and few full ones is the gate working, not a failure.
+
 ## 8. Watching progress while it runs
 
 `cli.py run` prints nothing to stdout while it works — it can look hung for

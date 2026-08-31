@@ -25,10 +25,11 @@ Also keep `family` and `parent` unchanged, for the same reason.
   count. Do not change what is being tested.
 - **`transient`** — an infrastructure failure, not your fault. Return the
   action unchanged.
-- **`leak_suspected`** — validation primary exceeded 0.75, which is far above
-  the 0.8645 oracle ceiling for a legitimate model. Something is reading the
-  label. Find the same-row post-exposure signal or the label-derived feature
-  and remove it. Never work around the check.
+- **`leak_suspected`** — validation primary exceeded 0.75. The baseline is
+  0.6016 and even a perfect ranking only reaches 0.8484 on validation, so a
+  jump that large is not a legitimate model: something is reading the label.
+  Find the same-row post-exposure signal or the label-derived feature and
+  remove it. Never work around the check.
 
 ## If it cannot be repaired
 

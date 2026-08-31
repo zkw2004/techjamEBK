@@ -25,6 +25,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent.gate import MIN_DELTA_FLOOR
+from agent.manifest import BASELINE_VALIDATION as BASELINE_VALIDATION_PRIMARY
 from agent.schema import FAMILIES, Action
 
 # Current model IDs. AGENT_PLAN.md Section 12 names claude-opus-4-5 and
@@ -109,10 +111,18 @@ def _usage(response: Any, model: str) -> dict:
 def summarise_history(history: list[dict], limit: int = 40) -> list[dict]:
     """Compress node records for the prompt.
 
-    A full node carries config, segments, gates and a traceback. Feeding 40 of
-    those back costs thousands of tokens per iteration for information the
-    proposer does not need. Keep what drives the next decision: what was tried,
-    whether it worked, and why it failed.
+    A full node carries segments, gates and a traceback. Feeding 40 of those
+    back costs thousands of tokens per iteration for information the proposer
+    does not need. Keep what drives the next decision: what was tried, whether
+    it worked, and why it failed.
+
+    ``config`` and ``fidelity`` are part of "what was tried" and were once
+    dropped here. Without ``config`` the proposer cannot see which features,
+    loss or hparams a node used, so it re-proposes settings it has already
+    tested and cannot tell that a claimed variation was a no-op. Without
+    ``fidelity`` a cheap screen pilot and a full evaluation are
+    indistinguishable, which is how a run spent 20 iterations proposing blends
+    against parents that were never full-tier and could never be eligible.
     """
     out = []
     for node in history[-limit:]:
@@ -122,6 +132,8 @@ def summarise_history(history: list[dict], limit: int = 40) -> list[dict]:
             "parent": node.get("parent"),
             "family": node.get("family"),
             "hypothesis": node.get("hypothesis"),
+            "fidelity": node.get("fidelity"),
+            "config": node.get("config") or None,
             "status": node.get("status"),
             "accepted": node.get("accepted", False),
             "primary": metrics.get("primary"),
@@ -133,6 +145,43 @@ def summarise_history(history: list[dict], limit: int = 40) -> list[dict]:
             row["fold_primaries"] = node["fold_primaries"]
         out.append({k: v for k, v in row.items() if v is not None})
     return out
+
+
+def eligible_blend_parents(history: list[dict]) -> list[str]:
+    """Node ids a blend may actually name, per pipeline/train.py::_parent_config.
+
+    The runner requires a parent that exists, succeeded, was accepted, is
+    full-tier, is not itself a blend, and was not generated code. None of that
+    was visible to the proposer, which produced 20 consecutive failed blend
+    proposals in one run — against the synthetic root, against screen nodes,
+    and against nodes that were never accepted. Computing the eligible set
+    here is cheaper than letting the runner reject each guess.
+    """
+    return [
+        node["id"]
+        for node in history
+        if node.get("id")
+        and node.get("status") == "ok"
+        and node.get("accepted") is True
+        and node.get("fidelity") == "full"
+        and node.get("action_type") != "code"
+        and (node.get("config") or {}).get("model") != "blend"
+    ]
+
+
+def available_features() -> dict[str, list[str]]:
+    """The only feature names ``Config.features`` can legally contain.
+
+    Raw fields resolve positionally in the matrix builder; registered names go
+    through the B3 registry. Anything else raises KeyError at smoke tier. A
+    run that could not see this list invented 11 plausible-sounding names and
+    lost every one of those iterations, continuing to invent more even after
+    an error message had spelled the registry out.
+    """
+    from pipeline.data import FIELDS
+    from pipeline.features import FEATURES
+
+    return {"official_baseline_fields": list(FIELDS), "registered": sorted(FEATURES)}
 
 
 def _families_covered(history: list[dict]) -> dict[str, int]:
@@ -162,8 +211,11 @@ def check_action_consistency(action: Action) -> None:
             raise ProposeError("type='blend' requires a config block")
         if action.config.model != "blend":
             raise ProposeError("type='blend' requires config.model == 'blend'")
-        if len(action.config.parents) < 2:
-            raise ProposeError("type='blend' requires at least two parents")
+        # pipeline/blending.py requires exactly two distinct parents. Accepting
+        # "at least two" here let three-parent blends pass proposal and die in
+        # the runner, costing a whole iteration each time.
+        if len(set(action.config.parents)) != 2:
+            raise ProposeError("type='blend' requires exactly two distinct parents")
 
 
 def check_repair_consistency(original: Action, repaired: Action) -> None:
@@ -216,6 +268,10 @@ def propose(history: list[dict], knowledge: str, parent: dict) -> tuple[Action, 
     context = {
         "best_so_far": parent,
         "families_covered": _families_covered(history),
+        "eligible_blend_parents": eligible_blend_parents(history),
+        "available_features": available_features(),
+        "baseline_to_beat": BASELINE_VALIDATION_PRIMARY,
+        "min_meaningful_delta": MIN_DELTA_FLOOR,
         "history": summarise_history(history),
     }
     user = (
