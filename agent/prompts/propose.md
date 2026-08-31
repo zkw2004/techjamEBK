@@ -15,9 +15,10 @@ relative order inside a user matters.
 - Label: **`long_view`** (0/1). Not `is_click`.
 - Metric: `primary = mean(GAUC, nDCG@5)`, computed per user then averaged.
 - Baseline to beat: FM at validation primary **0.6016**.
-- Oracle ceiling is **0.8645**, not 1.0 — 27.1% of users are all-negative and
-  score 0 on nDCG no matter what. Judge a delta against the remaining
-  headroom, not against 1.0.
+- Oracle ceiling on **validation** — the window you are scored on here — is
+  **0.8484**, not 1.0: users who are all-negative score 0 on nDCG no matter
+  what. (The hidden-test ceiling is 0.8645; do not mix the two.) Judge a delta
+  against the remaining headroom, not against 1.0.
 - Seed noise is **0.0008**. A delta below ~0.002 is not an improvement.
 
 ## What makes a good hypothesis
@@ -45,11 +46,31 @@ adjusts numbers.
 You are given `families_covered` — a count per family. Prefer an uncovered
 family unless the history gives you a specific reason not to.
 
+### Always start from the official five fields
+
+`config.features` **defaults to only `["user_id", "video_id"]`**. That is not
+the baseline — it is a crippled two-field model that scores near the
+popularity rung. The 0.6016 baseline uses all five official fields:
+
+```
+["user_id", "video_id", "author_id", "tab", "dur_bucket"]
+```
+
+Unless you are *deliberately* ablating a field and say so in the hypothesis,
+list all five explicitly in every config. A comparison against 0.6016 made
+with a different feature set is not a like-for-like comparison and cannot
+support a claim of improvement.
+
+The `available_features` block in the context lists every legal name: the five
+official fields plus the registered derived features. **A name that is not in
+that list raises an error and wastes the whole iteration** — never invent one.
+
 ### What the organisers have already measured — do not repeat these
 
-- **More static feature fields is a dead end.** All 13 CWM fields score 0.5940
-  against 0.5950 for the official 5. `user_id × video_id` already absorbs most
-  of the learnable signal.
+- **Going beyond the official five static fields is a dead end.** All 13 CWM
+  fields score 0.5940 against 0.5950 for the official 5. This says *5 → 13*
+  adds nothing; it does **not** say fewer than 5 is fine. Use all five, then
+  spend your iterations elsewhere.
 - **More capacity is a dead end.** Embedding dim 8/16/32 gives
   0.5895/0.5902/0.5887. 1.14M rows will not support a bigger model.
 - **Pure user-side first-order terms contribute exactly zero.** Ranking is
@@ -62,17 +83,34 @@ family unless the history gives you a specific reason not to.
 1. **Loss framing.** Pointwise BCE against a ranking metric is a genuine
    mismatch. Pairwise (BPR, sampling within a user) or listwise (lambdarank
    with a per-user group array) are the obvious tests.
-2. **User history sequences.** Nothing currently uses behavioural sequences,
-   and each user has hundreds to thousands of training interactions.
-3. **Multi-task heads.** `is_click`, `is_like`, `is_follow`, `is_comment`,
-   `is_forward`, `play_time_ms` are all legal as **auxiliary training
-   targets** and can enrich the shared embeddings. Read only the `long_view`
-   head at inference.
-4. **Watch-time modelling.** Watch time is censored when a video completes, so
-   a one-sided loss is more correct than squared error.
-5. **Model class** (DeepFM, DCN). Lower priority, given capacity is not the
+2. **Time features and drift** between the training and test windows.
+3. **Model class** (DeepFM). Lower priority, given capacity is not the
    bottleneck.
-6. **Time features and drift** between the training and test windows.
+
+Ranked below these by the organisers, but **not implemented in this codebase**
+— do not propose them, they cannot run: user history sequence models
+(DIN/SASRec), multi-task auxiliary heads, and censored watch-time regression.
+
+### Which loss each model actually implements
+
+A model that does not implement a loss **ignores it silently** and trains the
+identical model, so the experiment measures nothing. Only these combinations
+are legal, and anything else is rejected before it runs:
+
+| model | losses |
+|---|---|
+| `fm` | `pointwise`, `pairwise` (BPR, sampled within a user) |
+| `lgbm` | `pointwise`, `lambdarank` |
+| `deepfm` | `pointwise` |
+| `random`, `popularity` | `pointwise` |
+
+### Blend rules
+
+`config.parents` must name **exactly two distinct** node ids, and each must
+appear in the `eligible_blend_parents` list in your context. That list is
+already filtered to nodes that are accepted, successful, and full-tier —
+the only ones the runner will accept. If it is empty or has fewer than two
+entries, a blend is impossible this iteration: propose something else.
 
 ## Hard constraints
 
@@ -100,6 +138,7 @@ Return one `Action`:
 - `search_space` — required for `tune`
 - `code` — required for `code`
 
-For `blend`, `config.model` must be `"blend"` and `config.parents` must name at
-least two node ids. Blend only nodes whose errors plausibly differ; a blend of
+For `blend`, `config.model` must be `"blend"` and `config.parents` must name
+**exactly two distinct** ids drawn from `eligible_blend_parents` (see the
+blend rules above). Blend only nodes whose errors plausibly differ; a blend of
 two near-identical models is a wasted iteration.

@@ -569,3 +569,98 @@ def test_smoke_tier_completes_under_ten_seconds(monkeypatch):
     assert result["status"] == "ok"
     assert result["fidelity"] == "smoke"
     assert time.monotonic() - started < 10.0
+
+
+# --- FM pairwise / BPR (organiser headroom #1) --------------------------------
+
+def _bpr_fixture(n_users: int = 120, n_items: int = 8):
+    """Within-user preference: item class depends on the user, so the signal is
+    only learnable from ordering inside a user's own impressions."""
+    rows, labels, users = [], [], []
+    for user in range(n_users):
+        taste = user % 4
+        for item in range(n_items):
+            rows.append([f"u{user}", f"v{item}", f"a{item % 3}", "tab0", str(item % 5)])
+            labels.append(1 if item % 4 == taste else 0)
+            users.append(f"u{user}")
+    return (
+        np.array(rows, dtype=object),
+        np.array(labels, dtype=np.float32),
+        np.array(users, dtype=object),
+    )
+
+
+def _mean_positive_rank(scores, labels, n_users, n_items):
+    ranks = []
+    for user in range(n_users):
+        window = slice(user * n_items, (user + 1) * n_items)
+        order = np.argsort(-scores[window])
+        ranks.append(np.flatnonzero(labels[window][order] == 1).mean())
+    return float(np.mean(ranks))
+
+
+def test_fm_pairwise_learns_within_user_ordering():
+    X, y, users = _bpr_fixture()
+    model = FM(k=8, lr=0.05, max_epochs=12, batch_size=256, patience=12,
+                  seed=7, loss="pairwise")
+    model.fit(X, y, None, None, groups=(users, None))
+
+    # Two positives per user, so a perfect ranking scores 0.5 and chance ~3.5.
+    assert _mean_positive_rank(model.predict(X), y, 120, 8) < 1.5
+
+
+def test_fm_pairwise_is_not_a_silent_no_op():
+    """Regression: FM had no `loss` parameter at all, so every pairwise and
+    lambdarank proposal trained the identical pointwise model and reproduced
+    the identical score. A whole 'objective' family of experiments was
+    unfalsifiable because the variable under test was discarded."""
+    X, y, users = _bpr_fixture(n_users=40)
+    kwargs = dict(k=8, lr=0.01, max_epochs=4, batch_size=128, patience=4, seed=42)
+
+    pointwise = FM(**kwargs, loss="pointwise")
+    pointwise.fit(X, y, None, None, groups=(users, None))
+    pairwise = FM(**kwargs, loss="pairwise")
+    pairwise.fit(X, y, None, None, groups=(users, None))
+
+    assert not np.allclose(pointwise.predict(X), pairwise.predict(X))
+
+
+def test_fm_pairwise_is_deterministic_for_a_seed():
+    X, y, users = _bpr_fixture(n_users=40)
+
+    def scores(seed):
+        model = FM(k=8, lr=0.01, max_epochs=3, batch_size=128, patience=3,
+                      seed=seed, loss="pairwise")
+        model.fit(X, y, None, None, groups=(users, None))
+        return model.predict(X)
+
+    assert np.array_equal(scores(42), scores(42))
+    assert not np.array_equal(scores(42), scores(7))
+
+
+def test_fm_pairwise_rejects_training_data_with_only_one_class():
+    X = np.array([[f"u{i}", "v0", "a0", "t0", "0"] for i in range(6)], dtype=object)
+    users = np.array([f"u{i}" for i in range(6)], dtype=object)
+    model = FM(k=4, max_epochs=1, seed=0, loss="pairwise")
+
+    with pytest.raises(ValueError, match="both positive and negative training rows"):
+        model.fit(X, np.ones(6, dtype=np.float32), None, None, groups=(users, None))
+
+
+def test_fm_pairwise_needs_both_classes_within_the_same_user():
+    """Both classes exist globally, but no single user has both — so no pair can
+    be formed. Such users carry no within-user ordering signal, which is the
+    same reason the official evaluator excludes them from GAUC."""
+    X = np.array([[f"u{i // 2}", "v0", "a0", "t0", "0"] for i in range(8)], dtype=object)
+    users = np.array([f"u{i // 2}" for i in range(8)], dtype=object)
+    # users u0,u1 all-positive; u2,u3 all-negative.
+    y = np.array([1, 1, 1, 1, 0, 0, 0, 0], dtype=np.float32)
+    model = FM(k=4, max_epochs=1, seed=0, loss="pairwise")
+
+    with pytest.raises(ValueError, match="no user has both a positive and a negative"):
+        model.fit(X, y, None, None, groups=(users, None))
+
+
+def test_fm_rejects_a_loss_it_does_not_implement():
+    with pytest.raises(ValueError, match="FM loss must be one of"):
+        FM(loss="lambdarank")

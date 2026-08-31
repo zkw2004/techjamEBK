@@ -73,3 +73,41 @@ def test_blend_action_parses():
                    "blend_method": "rank_avg"},
     })
     assert action.config.parents == ["n014", "n022"]
+
+
+# --- combinations the runner can only ever reject at execution time -----------
+
+def test_a_loss_the_model_ignores_is_rejected_at_proposal_time():
+    """Regression: FM and DeepFM silently discarded `loss`, so 'objective
+    family' experiments trained an identical model and reported an identical
+    score. Rejecting here costs one cheap re-ask instead of a wasted
+    smoke run, an A5 repair attempt, and an iteration."""
+    with pytest.raises(ValidationError, match="does not implement loss"):
+        Config.model_validate({"model": "fm", "loss": "lambdarank"})
+    with pytest.raises(ValidationError, match="does not implement loss"):
+        Config.model_validate({"model": "deepfm", "loss": "pairwise"})
+    with pytest.raises(ValidationError, match="does not implement loss"):
+        Config.model_validate({"model": "lgbm", "loss": "pairwise"})
+
+
+def test_losses_each_model_really_implements_are_accepted():
+    assert Config.model_validate({"model": "fm", "loss": "pointwise"}).loss == "pointwise"
+    assert Config.model_validate({"model": "fm", "loss": "pairwise"}).loss == "pairwise"
+    assert Config.model_validate({"model": "lgbm", "loss": "lambdarank"}).loss == "lambdarank"
+
+
+def test_unimplemented_model_is_rejected_at_proposal_time():
+    """deepfm_mtl is in MODEL_REGISTRY but raises NotImplementedError on
+    construction; a run wasted iterations rediscovering that twice."""
+    with pytest.raises(ValidationError, match="not implemented"):
+        Config.model_validate({"model": "deepfm_mtl"})
+
+
+def test_blend_requires_exactly_two_distinct_parents():
+    """pipeline/blending.py requires exactly two; the proposer was only told
+    'at least two', so three-parent blends passed proposal and died in the
+    runner."""
+    assert len(Config.model_validate({"model": "blend", "parents": ["n1", "n2"]}).parents) == 2
+    for parents in ([], ["n1"], ["n1", "n2", "n3"], ["n1", "n1"]):
+        with pytest.raises(ValidationError, match="exactly two distinct"):
+            Config.model_validate({"model": "blend", "parents": parents})
