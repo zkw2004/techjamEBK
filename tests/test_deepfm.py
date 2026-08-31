@@ -658,3 +658,111 @@ def test_deepfm_accepts_a_patience_above_one_but_still_defaults_to_one():
     assert DeepFMModel(patience=4).patience == 4
     with pytest.raises(ValueError, match="patience must be at least 1"):
         DeepFMModel(patience=0)
+
+
+# --- C13: multi-task score fusion ----------------------------------------
+
+def _mtl_model(**overrides):
+    from pipeline.models.deepfm import DeepFMMultiTask
+
+    return DeepFMMultiTask(feature_names=list(_MTL_FIELDS),
+                           **{**_MTL_KWARGS, **overrides})
+
+
+def test_c13_fusion_defaults_off_and_returns_the_raw_long_view_head():
+    """C9's contract must be untouched: with fusion weights at 0, predict()
+    returns the long_view logits themselves.
+
+    Asserted against the network's own forward pass rather than against a
+    second fused model. Comparing two models that both have fusion off is
+    vacuous -- an implementation that fused unconditionally would rank-transform
+    both identically and still pass, since the transform is monotone. Only the
+    raw logits distinguish "fusion is off" from "fusion ran with one input".
+    """
+    import torch
+
+    X, y, click, like, users = _mtl_rows()
+    model = _mtl_model(aux_click_weight=0.3, aux_like_weight=0.2)
+    model.fit(X, y, None, None, groups=_mtl_groups(users, click, like))
+
+    model.network.eval()
+    with torch.no_grad():
+        raw, _aux = model.network(torch.as_tensor(model._encode(X), dtype=torch.long))
+
+    np.testing.assert_allclose(model.predict(X), raw.numpy(), rtol=0, atol=1e-6)
+
+
+def test_c13_fusion_changes_the_ranking_when_switched_on():
+    """The inverse guard: without it the default-off test would also pass on an
+    implementation that wired fusion to nothing."""
+    X, y, click, like, users = _mtl_rows()
+    groups = _mtl_groups(users, click, like)
+
+    off = _mtl_model(aux_click_weight=0.3, aux_like_weight=0.2)
+    off.fit(X, y, None, None, groups=groups)
+    on = _mtl_model(aux_click_weight=0.3, aux_like_weight=0.2,
+                    aux_click_fusion_weight=0.5)
+    on.fit(X, y, None, None, groups=groups)
+
+    assert not np.allclose(off.predict(X), on.predict(X))
+
+
+def test_c13_fusion_ranks_over_all_rows_not_within_a_batch():
+    """A user's rows can straddle a batch boundary. Ranking inside the batch
+    loop would rank each user against only the slice that happened to land in
+    the same chunk, which changes the answer as batch_size changes.
+
+    One fitted model is re-predicted at several batch sizes, so training is held
+    identical and only the inference path varies. The batch sizes are chosen to
+    be smaller than a single user's row count (6 here), which is what forces a
+    per-batch implementation to disagree.
+    """
+    X, y, click, like, users = _mtl_rows()
+    model = _mtl_model(aux_click_weight=0.3, aux_click_fusion_weight=0.5,
+                       aux_like_fusion_weight=0.4)
+    model.fit(X, y, None, None, groups=_mtl_groups(users, click, like))
+
+    model.batch_size = len(X)
+    whole = model.predict(X)
+    for batch_size in (2, 3, 7, 31):
+        model.batch_size = batch_size
+        np.testing.assert_allclose(
+            model.predict(X), whole, rtol=0, atol=1e-9,
+            err_msg=f"fused scores changed at batch_size={batch_size}",
+        )
+
+
+def test_c13_fused_output_keeps_the_frozen_predict_shape():
+    X, y, click, like, users = _mtl_rows()
+    model = _mtl_model(aux_click_weight=0.3, aux_like_weight=0.2,
+                       aux_click_fusion_weight=0.4, aux_like_fusion_weight=0.3)
+
+    model.fit(X, y, None, None, groups=_mtl_groups(users, click, like))
+    scores = model.predict(X)
+
+    assert scores.shape == (len(X),)
+    assert np.isfinite(scores).all()
+
+
+def test_c13_fusion_requires_a_user_id_field():
+    """Ranking within a user needs to know which user each row belongs to, and
+    the frozen predict() signature carries no user_ids -- so it is read off X
+    by name, and must fail loudly rather than silently skip fusion."""
+    from pipeline.models.deepfm import DeepFMMultiTask
+
+    X = np.asarray([["v1", "a1"], ["v2", "a2"]], dtype=object)
+    y = np.asarray([1.0, 0.0])
+    model = DeepFMMultiTask(feature_names=["video_id", "author_id"],
+                            aux_click_weight=0.3, aux_click_fusion_weight=0.5,
+                            **{**_MTL_KWARGS, "batch_size": 2})
+    model.fit(X, y, None, None,
+              groups={"train": np.array(["u1", "u2"]), "val": None,
+                      "aux_train": {"is_click": np.array([1.0, 0.0])}, "aux_val": None})
+
+    with pytest.raises(ValueError, match="requires a 'user_id' field"):
+        model.predict(X)
+
+
+def test_c13_rejects_negative_fusion_weights():
+    with pytest.raises(ValueError, match="aux fusion weights must be non-negative"):
+        _mtl_model(aux_click_fusion_weight=-0.1)
