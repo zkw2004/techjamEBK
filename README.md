@@ -163,6 +163,13 @@ Replace `n017` with the accepted full/confirm node ID. The output has exactly
 `row_id,user_id,video_id,score`; `row_id` is the positional index from
 `pipeline.data.load()`, never a join on user/video pairs.
 
+For the optional finals demo, [WALKTHROUGH.md](WALKTHROUGH.md) provides the
+three-minute shot list and a safe deterministic OOM-recovery replay:
+
+```bash
+python -m tools.oom_demo
+```
+
 ## Limitations
 
 - The organiser brief conflicts with its shipped evaluator. This project uses
