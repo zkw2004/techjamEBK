@@ -71,7 +71,7 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 - **Empirical-Bayes smoothing** — Shrink sparse group rates toward the global
   rate with `(clicks + alpha * global_rate) / (impressions + alpha)`, fitting
   `alpha` on internal folds only.
-- ~~**Exposure debiasing (randomised slice)**~~ — **Impossible on this data.**
+- **Exposure debiasing (randomised slice)** — **Impossible on this data.**
   `is_rand` is 0 for all 1,141,112 training rows, so there is no unbiased slice
   and no estimable propensity. Do not propose IPS or exposure reweighting.
 - **Blending** — Combine continuous predictions from **exactly two** distinct
