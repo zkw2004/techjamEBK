@@ -35,6 +35,7 @@ NODES_DIR = Path("logs/nodes")
 EVENT_LOG = Path("logs/run.jsonl")
 
 ID_PATTERN = re.compile(r"^n(\d{3,})$")
+CITATION_PATTERN = re.compile(r"\[ref:\s*[^\]]+\]")
 
 # Section 8.7. A node missing any of these is not a usable log entry: the
 # report generator (D7) reads these keys directly and does no hand-assembly.
@@ -272,3 +273,26 @@ def read_events() -> list[dict]:
         except json.JSONDecodeError:
             continue
     return events
+
+
+def render_hypothesis(node: dict) -> str:
+    """Judge-visible hypothesis text, including any embedded A12 citation."""
+    return str(node.get("hypothesis", ""))
+
+
+def render_run_log(nodes: list[dict] | None = None) -> str:
+    """Render a compact node log without inventing fields outside the ledger."""
+    rows = list_nodes() if nodes is None else nodes
+    lines = []
+    for node in rows:
+        citation = " cited" if CITATION_PATTERN.search(render_hypothesis(node)) else " uncited"
+        lines.append(
+            "{id} {status} {fidelity}{citation}: {hypothesis}".format(
+                id=node.get("id", ""),
+                status=node.get("status", ""),
+                fidelity=node.get("fidelity", ""),
+                citation=citation,
+                hypothesis=render_hypothesis(node),
+            )
+        )
+    return "\n".join(lines) + ("\n" if lines else "")

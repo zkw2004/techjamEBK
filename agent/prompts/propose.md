@@ -25,7 +25,7 @@ relative order inside a user matters.
 
 The `hypothesis` field is copied verbatim into the run log and is what the
 project is graded on. It must be a **falsifiable claim about this dataset**,
-with a mechanism.
+with a mechanism and one method citation.
 
 Good: "GAUC is computed per user while pointwise BCE optimises a global
 objective, so a listwise loss should align the training objective with the
@@ -33,8 +33,11 @@ metric and help most on users with many impressions."
 
 Bad: "Try lambdarank." — no claim, no mechanism, nothing to falsify.
 
-State what you expect to happen and why. If the result contradicts it, that is
-a useful node; if there was no prediction, it is a wasted iteration.
+State what you expect to happen and why. End the hypothesis with one populated
+inline citation tag from the provided `idea_bank`, formatted exactly like
+`[ref: AIDE — Jiang et al., 2025]`. Do not add a separate `references` field;
+`Action` has no such field. If the result contradicts it, that is a useful
+node; if there was no prediction, it is a wasted iteration.
 
 ## Choosing what to try
 
@@ -129,7 +132,7 @@ Violating any of these invalidates the run.
 
 Return one `Action`:
 
-- `hypothesis` — the falsifiable claim, as above. Required.
+- `hypothesis` — the falsifiable claim, including `[ref: ...]`. Required.
 - `reasoning` — why this follows from the history. Cite node ids.
 - `type` — `config` | `tune` | `code` | `blend`
 - `family` — the five above
