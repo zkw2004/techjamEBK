@@ -598,3 +598,268 @@ def leakage_check(fn: Callable, train_df, target_df) -> bool:
     corrupted = np.asarray(fn(train_sample, corrupted_target))
 
     return bool(np.array_equal(baseline, corrupted, equal_nan=True))
+
+
+# --- Duration-bias feature pack (B10) ---------------------------------------
+#
+# `video_duration`, `duration_bucket`, `pcr_hist`, `long_view_rate_by_duration_
+# group`. Citations (Appendix D idea bank): duration-quantile grouping is
+# D2Q (Zhan et al., KDD 2022) -- duration confounds watch-time labels, and
+# `long_view` is duration-derived, so raw duration and a naive "did they
+# finish it" rate both need to be read relative to a video's own duration
+# bucket rather than in absolute terms. The completion-ratio aggregate is
+# from the PCR baseline family / CWM (Zhao et al., KDD 2024) -- completion
+# behaviour predicts `long_view` beyond raw impression/click counts.
+#
+# `pipeline/train.py::_matrix` already special-cases the *inline* baseline
+# field `dur_bucket` (one of the five official FM fields): 10 quantile
+# buckets computed from `train_frame["duration_ms"]` via
+# `np.quantile(..., np.linspace(0, 1, 11)[1:-1])` + `np.searchsorted`. The
+# registered feature below is named `duration_bucket` -- deliberately not
+# `dur_bucket` -- so it never collides with that inline special case or the
+# baseline field name, while sharing the identical quantile-edge recipe via
+# `_duration_bucket_edges` so the two are consistent by construction rather
+# than by coincidence.
+
+DURATION_BUCKET_COUNT = 10  # D2Q's spirit: 10 quantile groups by default.
+
+
+def _duration_bucket_edges(train_df, n_buckets: int = DURATION_BUCKET_COUNT) -> np.ndarray:
+    """Interior quantile edges for D2Q-style duration bucketing (B10).
+
+    Fit on `train_df["duration_ms"]` ONLY -- `n_buckets - 1` interior edges
+    via `np.linspace(0, 1, n_buckets + 1)[1:-1]`, matching the inline
+    `dur_bucket` recipe in `pipeline/train.py::_matrix` at the default
+    `n_buckets=10`. Callers apply these same edges to any other frame with
+    `_apply_duration_buckets`; this function never sees or touches target
+    data, so the edges cannot be refit on a validation/test distribution.
+    `n_buckets` is configurable here (unit-testable independently) even
+    though the registered `duration_bucket`/`long_view_rate_by_duration_
+    group` features call it with the fixed default, since the registry
+    signature (8.4) has no room for a per-call parameter.
+    """
+    if train_df.empty:
+        raise ValueError("cannot fit duration bucket edges on an empty training frame")
+    if not isinstance(n_buckets, (int, np.integer)) or n_buckets < 1:
+        raise ValueError("n_buckets must be a positive integer")
+
+    durations = pd.to_numeric(train_df["duration_ms"], errors="coerce")
+    duration_values = durations.to_numpy(dtype=np.float64)
+    if durations.isna().any() or not np.isfinite(duration_values).all():
+        raise ValueError("training column 'duration_ms' must contain only finite numbers")
+
+    quantiles = np.linspace(0, 1, n_buckets + 1)[1:-1]
+    return np.quantile(duration_values, quantiles)
+
+
+def _apply_duration_buckets(frame, edges: np.ndarray) -> np.ndarray:
+    """Assign integer bucket indices in `[0, len(edges)]` from fixed `edges`.
+
+    Never fits: `edges` must already be computed (by `_duration_bucket_
+    edges` on a train frame) and are applied here unchanged, which is what
+    the B10 acceptance criterion ("quantile bucket edges computed on train
+    are reused unchanged for validation/test") requires.
+    """
+    durations = pd.to_numeric(frame["duration_ms"], errors="coerce")
+    duration_values = durations.to_numpy(dtype=np.float64)
+    if durations.isna().any() or not np.isfinite(duration_values).all():
+        raise ValueError("column 'duration_ms' must contain only finite numbers")
+    return np.searchsorted(edges, duration_values)
+
+
+@feature("video_duration")
+def video_duration(train_df, target_df) -> np.ndarray:
+    """Raw pre-exposure video duration (`duration_ms`) for each target row.
+
+    A static video property known before exposure -- not forbidden (see the
+    `duration_ms` note near `FORBIDDEN_SAME_ROW` above) and one of the five
+    official baseline fields (as `dur_bucket`). No statistics are fitted, so
+    this needs no train-only cutoff assertion, exactly like `hour_of_day`/
+    `day_of_week`.
+    """
+    del train_df  # Context-only feature: no statistics are fitted.
+    durations = pd.to_numeric(target_df["duration_ms"], errors="coerce")
+    duration_values = durations.to_numpy(dtype=np.float64)
+    if durations.isna().any() or not np.isfinite(duration_values).all():
+        raise ValueError("column 'duration_ms' must contain only finite numbers")
+    return duration_values
+
+
+@feature("duration_bucket")
+def duration_bucket(train_df, target_df) -> np.ndarray:
+    """Train-quantile duration bucket group, D2Q-style (default 10 buckets).
+
+    Edges are fit once on `train_df["duration_ms"]` via `_duration_bucket_
+    edges` and applied unchanged to `target_df` via `_apply_duration_
+    buckets` -- target's own duration distribution never influences the
+    edges. `duration_ms` is a static, pre-exposure property (like
+    `video_duration`), so -- as with `hour_of_day`/`day_of_week` -- this
+    does not need the in-sample dual path used by label-dependent
+    aggregates below: fitting edges on `train_df` and applying them to
+    `target_df` is safe and well-defined even when they are literally the
+    same frame (`train_df is target_df`, the in-sample matrix-construction
+    call from `pipeline/train.py::_matrix`), because no outcome/label
+    information is read at any point.
+    """
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    return _apply_duration_buckets(target_df, edges).astype(np.float64)
+
+
+def _completion_ratio(train_df) -> pd.Series:
+    """Per-row play-completion ratio `play_time_ms / duration_ms`, clipped
+    to `[0, 1]`; `duration_ms == 0` maps to a ratio of 0 rather than
+    dividing by zero.
+
+    `play_time_ms` is in `FORBIDDEN_SAME_ROW`, but this helper is only ever
+    called with `train_df` (the fitting side of the split), never
+    `target_df` -- exactly the same legal pattern as reading `long_view`
+    (the LABEL) out of `train_df` throughout this file.
+    """
+    play_time = pd.to_numeric(train_df["play_time_ms"], errors="coerce")
+    play_values = play_time.to_numpy(dtype=np.float64)
+    if play_time.isna().any() or not np.isfinite(play_values).all():
+        raise ValueError("training column 'play_time_ms' must contain only finite numbers")
+
+    duration = pd.to_numeric(train_df["duration_ms"], errors="coerce")
+    duration_values = duration.to_numpy(dtype=np.float64)
+    if duration.isna().any() or not np.isfinite(duration_values).all():
+        raise ValueError("training column 'duration_ms' must contain only finite numbers")
+
+    ratio = np.divide(
+        play_values,
+        duration_values,
+        out=np.zeros(len(train_df), dtype=np.float64),
+        where=duration_values > 0,
+    )
+    return pd.Series(np.clip(ratio, 0.0, 1.0), index=train_df.index)
+
+
+def _in_sample_pcr(train_df) -> np.ndarray:
+    """In-sample (`train_df is target_df`) leak-safe completion-ratio rate.
+
+    Mirrors `_in_sample_group_rate`'s shape exactly, generalised from a
+    binary label to the continuous completion ratio: strictly-prior sum
+    over `_prior_group_stats`, divided by strictly-prior count, falling
+    back to the strictly-prior running mean ratio (`_prior_global_rates`)
+    for a user's first-ever row. Time-decay is intentionally not applied
+    here, unlike the cross-frame branch of `pcr_hist` below -- none of the
+    existing in-sample helpers (`_in_sample_group_rate`,
+    `_in_sample_user_tag_affinity`) decay either, and this path only ever
+    runs while `pipeline/train.py::_matrix` builds the training design
+    matrix itself, never for out-of-sample scoring of validation/test rows.
+    """
+    ratio = _completion_ratio(train_df)
+    times = _event_times(train_df)
+    global_rates = _prior_global_rates(ratio, times)
+    prior_sum, prior_count = _prior_group_stats(train_df, ratio, times, ["user_id"])
+    return np.divide(prior_sum, prior_count, out=global_rates, where=prior_count > 0)
+
+
+@feature("pcr_hist")
+def pcr_hist(train_df, target_df) -> np.ndarray:
+    """Time-decayed, EB-smoothed historical play-completion ratio per user.
+
+    Design decision (B10), resolving a genuine ambiguity in AGENT_PLAN.md
+    Section 9.2: the plan names one feature, `pcr_hist`, described as
+    "historical play_time/duration ratio aggregates per user AND per
+    video" -- but that same row caps the pack at "all four registered"
+    features total, which leaves room for exactly one `pcr_hist` signal,
+    not two. This implementation picks USER-level completion-ratio
+    history, mirroring `user_ctr_decayed`'s exact shape (decay cutoff =
+    train max date, helper-default alpha/half-life) but aggregating the
+    per-row completion ratio from `_completion_ratio` instead of the
+    binary `long_view` label. A video-level twin (e.g. `video_pcr_hist`)
+    is a natural, obvious follow-up outside this task's four-feature
+    scope and is not attempted here.
+
+    `_assert_historical_cutoff` fails closed on the (train_df, target_df)
+    application path; the `train_df is target_df` case (used by
+    `pipeline/train.py::_matrix` to build the training matrix itself, per
+    Section 9.2's dual-path requirement) is delegated to `_in_sample_pcr`,
+    which never reads a row's own or a future row's `play_time_ms`.
+    """
+    if train_df is target_df:
+        return _in_sample_pcr(train_df)
+
+    _assert_historical_cutoff(train_df, target_df)
+    ratio = _completion_ratio(train_df)
+    dates = _parse_dates(train_df["date"])
+    if dates.isna().any():
+        raise ValueError("pcr_hist requires valid training dates")
+
+    weights = decay_weights(dates, dates.max())
+    fitting_rows = pd.DataFrame(
+        {
+            "user_id": train_df["user_id"].to_numpy(),
+            "_weighted_ratio": weights * ratio.to_numpy(),
+            "_weight": weights,
+        }
+    )
+    grouped = fitting_rows.groupby("user_id", sort=False)
+    weighted_ratio = grouped["_weighted_ratio"].sum()
+    effective_impressions = grouped["_weight"].sum()
+    global_rate = float(ratio.mean())
+    rates = eb_smooth(weighted_ratio, effective_impressions, global_rate)
+    return target_df["user_id"].map(rates).fillna(global_rate).to_numpy(dtype=np.float64)
+
+
+def _in_sample_duration_group_rate(train_df) -> np.ndarray:
+    """In-sample (`train_df is target_df`) leak-safe long_view rate by
+    duration bucket.
+
+    Bucket edges are fit on the full `train_df["duration_ms"]` distribution
+    via `_duration_bucket_edges` -- safe even though that spans rows past a
+    given row's own `time_ms`, because `duration_ms` is a static,
+    pre-exposure video property carrying no outcome information (the same
+    reasoning `duration_bucket` documents). The `long_view` RATE within
+    each bucket is what must stay strictly historical, and that part uses
+    `_prior_group_stats`/`_prior_global_rates` exactly like
+    `_in_sample_group_rate`, keyed on the row's own bucket assignment.
+    """
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    buckets = _apply_duration_buckets(train_df, edges)
+    labels = _numeric_labels(train_df)
+    times = _event_times(train_df)
+    global_rates = _prior_global_rates(labels, times)
+    frame_with_bucket = train_df.assign(_duration_bucket=buckets)
+    prior_sum, prior_count = _prior_group_stats(
+        frame_with_bucket, labels, times, ["_duration_bucket"]
+    )
+    return np.divide(prior_sum, prior_count, out=global_rates, where=prior_count > 0)
+
+
+@feature("long_view_rate_by_duration_group")
+def long_view_rate_by_duration_group(train_df, target_df) -> np.ndarray:
+    """EB-smoothed `long_view` rate within train-quantile duration bucket.
+
+    D2Q-style target encoding (Zhan et al., KDD 2022): `long_view` is
+    duration-derived, so a raw historical long-view rate mixes together
+    videos of very different lengths. Bucketing by `_duration_bucket_
+    edges`/`_apply_duration_buckets` -- the exact same helpers `duration_
+    bucket` uses, so the two features are consistent by construction --
+    isolates that confound before EB-smoothing (`eb_smooth`, alpha
+    default) the within-bucket rate toward the train-wide `long_view`
+    mean. Edges are fit on `train_df` only and reused unchanged for
+    `target_df`, satisfying the same no-refit acceptance criterion as
+    `duration_bucket`.
+    """
+    if train_df is target_df:
+        return _in_sample_duration_group_rate(train_df)
+
+    _assert_historical_cutoff(train_df, target_df)
+    labels = _numeric_labels(train_df)
+    global_rate = float(labels.mean())
+
+    edges = _duration_bucket_edges(train_df, DURATION_BUCKET_COUNT)
+    train_buckets = _apply_duration_buckets(train_df, edges)
+    fitting_rows = pd.DataFrame({"_bucket": train_buckets, "_label": labels.to_numpy()})
+    grouped = fitting_rows.groupby("_bucket", sort=False)["_label"].agg(["sum", "count"])
+    rates = eb_smooth(grouped["sum"], grouped["count"], global_rate)
+
+    target_buckets = _apply_duration_buckets(target_df, edges)
+    return (
+        pd.Series(target_buckets)
+        .map(rates)
+        .fillna(global_rate)
+        .to_numpy(dtype=np.float64)
+    )
