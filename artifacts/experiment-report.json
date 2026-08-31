@@ -217,7 +217,10 @@
     "tokens_out": 7846,
     "tokens": 40642,
     "gpu_hours": 0.0,
-    "manual_interventions": 0
+    "manual_interventions": 0,
+    "wall_clock_seconds": 368.0,
+    "controller_iterations_used": 12,
+    "iteration_cap": 50
   },
   "iterations": {
     "pilot": 17,

@@ -25,17 +25,23 @@ a snapshot, not a live check.
       files, one per attempt, each carrying hypothesis / diff / metrics /
       error-recovery events.
 
-- [x] **D4 — Final submission** → [`submission.csv`](submission.csv)
+- [x] **D4 — Final submission** → `submission.csv` (generated, **not** in git)
       Five-seed train+validation refit of the accepted node. Passed the
-      organiser's own unmodified checker: 170,588 rows, `split=test`.
+      organiser's unmodified checker: 170,588 rows, `split=test`.
+      **Action needed:** upload it to the competition platform. It is
+      deliberately not committed — `.gitignore` excludes `*.csv` to keep the
+      194MB archive out of git, and it is 6.4MB against a 2MB pre-commit
+      ceiling. Regenerate any time with `make finalize`.
 
 - [x] **D5 — Results summary** → [`DELIVERABLES.md`](DELIVERABLES.md#results-summary-d5)
       Validation-best component metrics + absolute delta vs. published
       baseline, in a table.
 
 - [x] **D6 — Resource report** → [`artifacts/experiment-report.md`](artifacts/experiment-report.md)
-      Total tokens (in/out) and GPU-hours across every LLM call and
-      training run.
+      All four Feasibility inputs: 40,642 tokens (32,796 in / 7,846 out),
+      6m 8s agent wall-clock, 12 / 50 controller iterations used, 0
+      GPU-hours. Also summarised in
+      [`DELIVERABLES.md`](DELIVERABLES.md#resource-usage-d6).
 
 - [x] **D7 — Secret hygiene** → verified below
       `.env` never committed; not present anywhere in git history.

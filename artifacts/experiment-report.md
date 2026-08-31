@@ -37,6 +37,8 @@
 - Nodes: 21
 - Tokens: 40642 (32796 in, 7846 out)
 - GPU-hours: 0.000000
+- Agent wall-clock: 6m 8s (368s)
+- Controller iterations used: 12 / 50 cap
 - Manual interventions: 0
 - Pilot iterations: 17
 - Full/confirm iterations: 4

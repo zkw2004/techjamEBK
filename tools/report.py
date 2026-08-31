@@ -15,11 +15,16 @@ import argparse
 import json
 import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 BASELINE_VALIDATION = 0.6016
 BASELINE_TEST = 0.5946
+
+# K23 (02_REQUIREMENTS.md): hard per-run cap. Reported alongside the
+# iterations actually used, since Feasibility asks for both.
+ITERATION_CAP = 50
 PILOT_FIDELITIES = {"smoke", "screen"}
 FULL_FIDELITIES = {"full", "confirm"}
 DEFAULT_TRAJECTORY = Path("artifacts/trajectory.png")
@@ -74,6 +79,39 @@ def load_json_report(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"diagnostic report must be a JSON object: {path}")
     return value
+
+
+def _wall_clock_seconds(events: list[dict[str, Any]] | None) -> float | None:
+    """Elapsed controller wall-clock, first event to last, or None.
+
+    Deliberately not a sum of per-node ``seconds``: that measures compute and
+    misses the LLM latency the loop spends between nodes, which for this
+    project dominates -- a 21-node run used roughly nine minutes of training
+    but far more of it waiting on proposals.
+    """
+    stamps = sorted(
+        str(event["timestamp"]) for event in (events or []) if event.get("timestamp")
+    )
+    if len(stamps) < 2:
+        return None
+    try:
+        start = datetime.fromisoformat(stamps[0].replace("Z", "+00:00"))
+        end = datetime.fromisoformat(stamps[-1].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return max(0.0, (end - start).total_seconds())
+
+
+def _controller_iterations_used(events: list[dict[str, Any]] | None) -> int | None:
+    """Controller loop passes, which is what the 50-iteration cap counts.
+
+    Not the node count: one iteration can write several nodes as a candidate
+    escalates through the fidelity tiers, and an iteration whose proposal
+    failed writes none at all.
+    """
+    if events is None:
+        return None
+    return sum(1 for event in events if event.get("event") == "iteration")
 
 
 def build_judge_visibility(
@@ -145,6 +183,19 @@ def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def _format_wall_clock(seconds: float | None) -> str:
+    """Human-readable elapsed time, or an explicit unavailable marker."""
+    if seconds is None:
+        return "unavailable (no event log)"
+    minutes, remainder = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {remainder}s ({seconds:.0f}s)"
+    if minutes:
+        return f"{minutes}m {remainder}s ({seconds:.0f}s)"
+    return f"{remainder}s"
+
+
 def build_report(
     nodes: list[dict[str, Any]],
     *,
@@ -192,6 +243,16 @@ def build_report(
             "manual_interventions": sum(
                 bool(node.get("manual_intervention", False)) for node in nodes
             ),
+            # Both are named Feasibility & Practicality inputs alongside tokens
+            # and GPU-hours, and neither is derivable from the node ledger: a
+            # node records its own compute seconds, not the controller's
+            # wall-clock, and one controller iteration can emit several nodes
+            # as a candidate escalates smoke -> screen -> full. They come from
+            # the event log instead, and are None when it is unavailable rather
+            # than silently reported as zero.
+            "wall_clock_seconds": _wall_clock_seconds(events),
+            "controller_iterations_used": _controller_iterations_used(events),
+            "iteration_cap": ITERATION_CAP,
         },
         "iterations": {
             "pilot": pilot,
@@ -257,6 +318,10 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- Nodes: {totals['nodes']}",
             f"- Tokens: {totals['tokens']} ({totals['tokens_in']} in, {totals['tokens_out']} out)",
             f"- GPU-hours: {totals['gpu_hours']:.6f}",
+            f"- Agent wall-clock: {_format_wall_clock(totals['wall_clock_seconds'])}",
+            f"- Controller iterations used: "
+            f"{_display(totals['controller_iterations_used'])}"
+            f" / {totals['iteration_cap']} cap",
             f"- Manual interventions: {totals['manual_interventions']}",
             f"- Pilot iterations: {iterations['pilot']}",
             f"- Full/confirm iterations: {iterations['full']}",

@@ -45,9 +45,14 @@ def test_report_aggregates_results_resources_and_iteration_tiers(tmp_path):
 
     assert [row["id"] for row in report["results"]] == ["n001", "n002"]
     assert report["results"][1]["delta_vs_baseline"] == pytest.approx(0.0134)
+    # wall-clock and controller iterations come from the event log, which this
+    # call does not supply: they are None rather than 0, so a report built
+    # without events cannot be mistaken for a run that took no time.
     assert report["totals"] == {
         "nodes": 2, "tokens_in": 200, "tokens_out": 50, "tokens": 250,
         "gpu_hours": 0.5, "manual_interventions": 1,
+        "wall_clock_seconds": None, "controller_iterations_used": None,
+        "iteration_cap": 50,
     }
     assert report["iterations"] == {
         "pilot": 1, "full": 1, "other": 0,
@@ -149,3 +154,41 @@ def test_event_loader_tolerates_truncated_tail(tmp_path):
     path = tmp_path / "run.jsonl"
     path.write_text('{"event":"iteration","strikes":1}\n{"event":', encoding="utf-8")
     assert load_events(path) == [{"event": "iteration", "strikes": 1}]
+
+
+def test_report_reports_wall_clock_and_iterations_against_the_cap():
+    """Feasibility & Practicality asks for total agent wall-clock and the
+    iterations used out of the 50 cap, alongside tokens and GPU-hours.
+
+    Neither is derivable from the node ledger. A node records its own compute
+    seconds, not the controller's elapsed time -- and for this project the gap
+    is large, because the loop spends most of its wall-clock waiting on
+    proposals rather than training. One controller iteration can also emit
+    several nodes as a candidate escalates smoke -> screen -> full, or none at
+    all when its proposal fails, so the node count is not the iteration count.
+    """
+    from tools.report import build_report
+
+    events = [
+        {"event": "iteration", "timestamp": "2026-08-31T13:59:55Z"},
+        {"event": "promotion", "timestamp": "2026-08-31T14:02:00Z"},
+        {"event": "iteration", "timestamp": "2026-08-31T14:04:00Z"},
+        {"event": "iteration", "timestamp": "2026-08-31T14:06:03Z"},
+    ]
+
+    totals = build_report([], events=events)["totals"]
+
+    assert totals["wall_clock_seconds"] == pytest.approx(368.0)
+    assert totals["controller_iterations_used"] == 3  # not 4: promotion is not an iteration
+    assert totals["iteration_cap"] == 50
+
+
+def test_wall_clock_is_none_rather_than_zero_without_a_usable_event_log():
+    """A missing or single-event log must not render as a run that took no
+    time -- that would understate a Feasibility input rather than omit it."""
+    from tools.report import build_report
+
+    assert build_report([], events=[])["totals"]["wall_clock_seconds"] is None
+    assert build_report([], events=[{"event": "iteration", "timestamp": "2026-08-31T13:59:55Z"}])[
+        "totals"
+    ]["wall_clock_seconds"] is None
