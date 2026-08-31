@@ -689,7 +689,16 @@ def test_c13_fusion_defaults_off_and_returns_the_raw_long_view_head():
     with torch.no_grad():
         raw, _aux = model.network(torch.as_tensor(model._encode(X), dtype=torch.long))
 
-    np.testing.assert_allclose(model.predict(X), raw.numpy(), rtol=0, atol=1e-6)
+    # Production predict() batches at model.batch_size while this direct
+    # reference evaluates all rows at once. Linux BLAS changes one float32
+    # accumulation by 1.9e-6; allow 32 float32 epsilons while keeping rtol=0,
+    # which is still far tighter than any ranking-relevant score difference.
+    np.testing.assert_allclose(
+        model.predict(X),
+        raw.numpy(),
+        rtol=0,
+        atol=32 * np.finfo(np.float32).eps,
+    )
 
 
 def test_c13_fusion_changes_the_ranking_when_switched_on():
