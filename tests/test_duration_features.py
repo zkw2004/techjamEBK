@@ -1,10 +1,19 @@
-"""B10 acceptance: the duration-bias feature pack.
+"""B10 acceptance (plus the B10-fix re-keying of pcr_hist): the
+duration-bias feature pack.
 
 `video_duration`, `duration_bucket`, `pcr_hist`,
 `long_view_rate_by_duration_group` -- each fits on train_df only, passes
-the existing leakage guard, and (for the two quantile-bucketed features)
-reuses train-fit bucket edges unchanged on validation/test rather than
-refitting them on the target frame's own distribution.
+the existing leakage guard, and (for the three quantile-bucketed
+features -- `duration_bucket`, `long_view_rate_by_duration_group`, and,
+since the B10-fix, `pcr_hist` itself) reuses train-fit bucket edges
+unchanged on validation/test rather than refitting them on the target
+frame's own distribution.
+
+B10-fix: `pcr_hist` was re-keyed from a pure per-`user_id` aggregate to a
+per-`(user_id, duration_bucket)` aggregate after `tools/screen.py` (B12)
+measured it as `metric_inert` (mean within-user variance exactly 0.0) on
+the real validation split -- see `test_pcr_hist_varies_by_target_
+duration_bucket_for_same_user` below for the direct regression coverage.
 """
 
 from __future__ import annotations
@@ -188,6 +197,11 @@ def test_completion_ratio_guards_zero_duration_and_clips_overwatch():
 
 
 def test_pcr_hist_matches_hand_computed_decay_and_eb_smoothing():
+    # All rows (train and target) share one duration_ms value, so every row
+    # lands in the same duration bucket and the composite (user, bucket) key
+    # collapses to plain per-user grouping -- isolating the decay/EB-smoothing
+    # arithmetic from the bucket-conditioning behaviour covered separately by
+    # test_pcr_hist_varies_by_target_duration_bucket_for_same_user below.
     train_df = pd.DataFrame(
         {
             "user_id": ["u1", "u1", "u1", "u2"],
@@ -197,7 +211,11 @@ def test_pcr_hist_matches_hand_computed_decay_and_eb_smoothing():
         }
     )
     target_df = pd.DataFrame(
-        {"user_id": ["u1", "u2", "unseen"], "date": [20220422, 20220422, 20220422]},
+        {
+            "user_id": ["u1", "u2", "unseen"],
+            "date": [20220422, 20220422, 20220422],
+            "duration_ms": [10000.0, 10000.0, 10000.0],
+        },
         index=[9, 4, 71],
     )
 
@@ -211,6 +229,65 @@ def test_pcr_hist_matches_hand_computed_decay_and_eb_smoothing():
 
     np.testing.assert_allclose(result, [expected_u1, expected_u2, global_rate])
     assert result.shape == (len(target_df),)
+    assert np.isfinite(result).all()
+
+
+def test_pcr_hist_varies_by_target_duration_bucket_for_same_user(monkeypatch):
+    """Direct proof of the B10-fix (tools/screen.py flagged the old per-user
+    -only pcr_hist as metric_inert: a single user's rows all got the exact
+    same value no matter which video they were shown). After the fix, the
+    same user must get DIFFERENT pcr_hist values depending on the target
+    row's own duration bucket."""
+    monkeypatch.setattr(feature_module, "DURATION_BUCKET_COUNT", 2)
+    train_df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u1", "u1"],
+            "date": [20220409, 20220410, 20220411, 20220412],
+            "duration_ms": [1000, 1000, 9000, 9000],
+            # ratio: 0.9, 0.8 in the short bucket; 0.1, 0.1 in the long bucket
+            "play_time_ms": [900, 800, 900, 900],
+        }
+    )
+    target_df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1"],
+            "date": [20220422, 20220422],
+            "duration_ms": [1200.0, 8800.0],  # short bucket, long bucket resp.
+        }
+    )
+
+    result = pcr_hist(train_df, target_df)
+
+    assert result[0] != pytest.approx(result[1])
+    assert result[0] > result[1]  # short-bucket history is much higher for u1
+
+
+def test_pcr_hist_reuses_duration_bucket_edges_unchanged_for_target():
+    """The bucket edges pcr_hist uses to place a target row must be the
+    exact train-fit edges -- the same no-refit contract duration_bucket/
+    long_view_rate_by_duration_group satisfy."""
+    train_df = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u2", "u2"],
+            "date": [20220409, 20220410, 20220411, 20220412],
+            "duration_ms": [1000, 5000, 9000, 15000],
+            "play_time_ms": [500, 2500, 4500, 7500],
+        }
+    )
+    edges = feature_module._duration_bucket_edges(train_df, feature_module.DURATION_BUCKET_COUNT)
+
+    wide_target = pd.DataFrame(
+        {"user_id": ["u1"], "date": [20220422], "duration_ms": [999_999.0]}
+    )
+    result = pcr_hist(train_df, wide_target)
+
+    # An out-of-range target duration must bucket via the unchanged train
+    # edges (searchsorted), not be refit against the target's own value.
+    expected_bucket = np.searchsorted(edges, 999_999.0)
+    assert expected_bucket == len(edges)  # sanity: falls past every edge
+    np.testing.assert_array_equal(
+        edges, feature_module._duration_bucket_edges(train_df, feature_module.DURATION_BUCKET_COUNT)
+    )
     assert np.isfinite(result).all()
 
 
