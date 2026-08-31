@@ -91,12 +91,14 @@ class LGBM:
             order, train_group = self._group_order(train_users)
             encoded_train = encoded_train[order]
             y_train = y_train[order]
+            self._assert_group_boundaries(train_users[order], train_group)
             if encoded_val is not None:
                 if validation_users is None:
                     raise ValueError("lambdarank validation requires validation user ids")
                 validation_order, validation_group = self._group_order(validation_users)
                 encoded_val = encoded_val[validation_order]
                 y_val = y_val[validation_order]
+                self._assert_group_boundaries(validation_users[validation_order], validation_group)
 
         train_set = lgb.Dataset(
             encoded_train,
@@ -223,6 +225,57 @@ class LGBM:
         if validation_users.ndim != 1 or len(validation_users) != len(X_val):
             raise ValueError("validation groups must have one user id per row")
         return train_users, validation_users
+
+    @staticmethod
+    def _assert_group_boundaries(users_in_row_order: np.ndarray, counts) -> None:
+        """LambdaRank group boundaries must be exactly the user boundaries.
+
+        This is the structural match between the loss and the metric: GAUC and
+        nDCG@5 are computed per user, so lambdarank only optimises the scored
+        quantity if each of its groups is one user's impression list. LightGBM
+        takes `group` positionally — the first `counts[0]` rows are group 0,
+        the next `counts[1]` are group 1 — and validates nothing beyond the
+        total summing to the row count. A group array that disagrees with the
+        row order is therefore accepted silently: training proceeds, ranks are
+        optimised across user boundaries, and the only symptom is a quietly
+        worse score.
+
+        Checked here rather than trusted because `_group_order` deriving both
+        halves consistently is a property of today's implementation, not of
+        the interface: `fit` also accepts caller-supplied `groups`, and any
+        future change that reorders rows without recomputing counts (or vice
+        versa) reintroduces exactly this silent failure.
+
+        Honest limit: this validates the *user ids* against the counts, so it
+        catches inconsistent or non-contiguous grouping. It cannot detect a
+        reordering applied to the user ids but not to the feature matrix —
+        both would still look internally consistent from here.
+        """
+        counts = np.asarray(list(counts), dtype=np.int64)
+        if counts.size and counts.min() <= 0:
+            raise ValueError("lambdarank group sizes must all be positive")
+        if int(counts.sum()) != len(users_in_row_order):
+            raise ValueError(
+                f"lambdarank group sizes sum to {int(counts.sum())} but there are "
+                f"{len(users_in_row_order)} rows; every row must belong to exactly one group"
+            )
+        boundaries = np.cumsum(counts)[:-1]
+        blocks = np.split(np.asarray(users_in_row_order).astype(str), boundaries)
+        seen: set[str] = set()
+        for index, block in enumerate(blocks):
+            distinct = set(block.tolist())
+            if len(distinct) != 1:
+                raise ValueError(
+                    f"lambdarank group {index} spans {len(distinct)} users; each group "
+                    "must be exactly one user's impressions"
+                )
+            user = distinct.pop()
+            if user in seen:
+                raise ValueError(
+                    f"user {user!r} appears in more than one lambdarank group; a user's "
+                    "rows must be contiguous so its group is its whole impression list"
+                )
+            seen.add(user)
 
     @staticmethod
     def _group_sizes(user_ids: np.ndarray) -> np.ndarray:
