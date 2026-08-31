@@ -90,6 +90,16 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 
 Each cost real compute; repeating one wastes an iteration.
 
+> **These entries postdate the submitted run.** The ledger in `logs/nodes/`
+> and the artifacts in `artifacts/` come from a run made *before* this section
+> gained its feature-set findings, so re-running the agent now will not
+> reproduce that ledger node-for-node — the proposer sees strictly more
+> evidence than it did then. A later run with these priors did propose the
+> 15-feature LightGBM config named below, which the earlier runs never tried,
+> and still converged on the same best result (0.602960, FM with BPR pairwise
+> loss). The submitted run is retained under the git tag
+> `run-21node-converged`.
+
 - **The completed single-feature sweep is a boundary, not a verdict that
   static or engineered features are a dead end.** All 20 features registered
   at the time were tested one at a time on top of `FIELDS` with FM at full
@@ -133,8 +143,14 @@ Each cost real compute; repeating one wastes an iteration.
   combined with video** — trees found an interaction, so judge feature groups
   jointly, not one at a time. And **more is not better**: all 19 features
   scored *below* the 5 official fields, so subset choice matters more than
-  count. This is the largest single gain measured in the project, and no agent
-  run has ever proposed a LightGBM config with more than 5 features.
+  count. **Read the absolute column, not the delta column.** This is the
+  largest single *gain* in the project, but 5-field LightGBM starts about
+  0.003 *below* the FM baseline, so +0.0028 only brings it to parity —
+  0.601344 against a 0.6016 bar. A later agent run proposed exactly this
+  15-feature config and measured **0.601656**, reproducing the gain
+  (+0.0031 over 5-field LightGBM) and confirming it does not clear the bar
+  on its own. Its value is as a **blend parent**, not a standalone
+  candidate: FM × LightGBM `logit_avg` reached 0.603353 by hand.
 
 - **Blending needs disagreeing parents, and `rank_avg` is the wrong default
   here.** FM × DeepFM+SENet failed (per-user Spearman **+0.7975** — DeepFM
