@@ -28,7 +28,9 @@ python -m tools.report \
 ## Submission and presentation
 
 - [Devpost narrative](DEVPOST.md)
-- [Three-minute walkthrough and recovery demo](WALKTHROUGH.md)
+- [Three-minute YouTube walkthrough and recovery demo](WALKTHROUGH.md) —
+  recording and public upload still required; do not mark complete until the
+  signed-out link works and the final runtime is at most 3:00.
 - [Final submission](submission.csv) — generated with `cli.py finalize` (`make
   finalize`) only after the ledger contained an accepted, successful `full`
   node. This safeguard prevents an unpromoted pilot or fabricated winner from

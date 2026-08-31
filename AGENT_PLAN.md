@@ -895,7 +895,7 @@ All three sit **inside the noise floor** — seed std is 0.0008 and `MIN_DELTA_F
 | D7 | `tools/report.py`: all deliverable tables from `logs/nodes/*.json` | A2 | Emits results table, absolute delta vs baseline, total tokens, total GPU-hours, manual intervention count, pilot-vs-full breakdown. Zero hand-assembly |
 | D8 | `tools/finalise.py`: refit on train+val, 5 seeds, submission | C1, D1 | Refits the chosen config on the full permitted training period (train + validation) before predicting test; averages 5 seeds; `submit.py --check` passes; `row_id` alignment verified |
 | D9 | README, trajectory plot, Devpost writeup | D7, D8 | One-command startup verified from a clean clone; README covers overview, setup, reproduction, limitations, contributions, and the unresolved metric discrepancy |
-| D10 | *(Optional)* walkthrough video with injected-failure demo | D9 | See Section 14.2 |
+| D10 | Required public three-minute YouTube walkthrough with injected-failure demo | D9 | See Section 14.2; verify the uploaded link signed out before Devpost submission |
 | D12 | Promotion-threshold correction (**amends 6.6's statistical gate — closes the noise-floor issue named in trap 5**). Accept requires BOTH: user-level bootstrap 95% CI of the primary-delta excludes 0, AND point delta ≥ 0.002 (= ε, ≈ 2.5σ of the baseline's 5-seed std 0.0008). | D2 | **Implemented, at the call site rather than in `gate.accept()` itself.** `test_gate.py`: synthetic +0.001 delta with tight CI is rejected (threshold), +0.004 with CI spanning 0 is rejected (noise), +0.004 with CI > 0 is accepted. — The frozen 8.8 contract for `gate.accept()` is untouched (it still returns the bootstrap-CI verdict alone); the combined rule lives in `agent/loop.py::_accept_full`, which requires both the CI check and `primary - max(baseline, incumbent) >= MIN_DELTA_FLOOR` before accepting a full-tier node, and records `gates`/`ci_95`/`delta_vs_best` on the node so the decision is auditable. `tests/test_loop.py` covers all three cases from this row's acceptance criteria by name. This closes a real incident: a run once accepted its first full node (primary 0.5837, *below* the shipped 0.6016 baseline) unconditionally and used it as the reference for the rest of the run. |
 | D13 | Leakage canary probes, pre-flight: (a) permute `long_view` labels within user on train, retrain the cheapest model — validation GAUC must land in 0.5 ± 0.02; (b) a deliberately leaky fixture feature (built from future `long_view`) must trip the alarm. Run once before iteration 1 and record the result in the run log. | B2, C2 | Both canaries implemented as pytest + a `--preflight` CLI mode. Injected leaky feature raises; clean pipeline passes. Preflight result appears in the run log header. |
 | D14 | Judge-visible reporting of the new machinery: run-log renderer shows, per iteration, the strike counter (A11), any `scheduler_forced` flag, the latest ablation sensitivity table (A10), citations (A12), and the metric-inert feature list (B12). **New:** also surface the candidate-count diagnostics from §5.4 (median 4 candidates/user, 57.8% GAUC-usable) once, in the report header — without this, a +0.002 delta reads as trivial to a judge; with it, it's legible as a large effect on this task. Add the ablation table + solution tree to the demo script. | A10, A11, A12, B12, D7 | Rendered log for a 5-iteration mock run contains all five elements plus the header diagnostics. Demo script section drafted with one screenshot placeholder per element. |
@@ -935,7 +935,7 @@ Nothing else starts until this is done.
 ### 10.4 Day 3
 
 - **Morning:** B14 (sim_to_history + confirm-tier gate) if time, D7, D8, final run
-- **Afternoon:** D9, optional D10
+- **Afternoon:** D9 and required D10 recording/upload
 - **Buffer:** 3 hours minimum before deadline
 
 ### 10.5 Descope ladder
@@ -1041,7 +1041,10 @@ dev = ["pytest", "ruff", "pre-commit", "detect-secrets"]
 
 ## 13. Deliverables
 
-Mapped to the challenge brief, Section 2.5. **Note: unlike Tracks 3, 4 and 5, Track 2 does not list a demo video.** Verify at the webinar, but as written the brief specifies only four deliverables for this track. A walkthrough is still worth making for the finals pitch; treat it as optional and schedule it last.
+Mapped to the confirmed Devpost submission requirements. The submission must
+provide three things: a written solution/tech-stack description, a public code
+repository with a comprehensive README, and a public three-minute YouTube demo
+showing the working solution end-to-end.
 
 - [ ] **Devpost writeup:** how the solution addresses the problem, dev tools, APIs, libraries and frameworks, datasets and assets
 - [ ] **Public GitHub repo:** well-structured commented code covering all components; README with overview, setup and installation, steps to reproduce, reflection on limitations and future improvements, per-member contributions
@@ -1050,7 +1053,7 @@ Mapped to the challenge brief, Section 2.5. **Note: unlike Tracks 3, 4 and 5, Tr
 - [ ] **Results summary:** validation-best component metrics and the absolute delta over the official baseline
 - [ ] **Resource report:** total input + output tokens across all LLM calls, and total GPU-hours to the converged result
 - [ ] **No secrets** in source, git history, logs, traces, screenshots, or output
-- [ ] *(Optional)* walkthrough video
+- [ ] **Public three-minute YouTube walkthrough video**, verified while signed out
 
 ---
 
@@ -1171,7 +1174,7 @@ than FM, are also untested.
 | Which metric does `evaluate.py` actually score, given the NDCG@10/Recall@50 vs GAUC/nDCG@5 discrepancy? | Webinar attendee | Day 0, 14:45 |
 | What is the compute budget (listed as TBD)? | Same | Day 0, 14:45 |
 | Does seeding the agent with a static knowledge file count as a manual intervention? | Same | Day 0, 14:45 |
-| Is a demo video required for Track 2? | Same | Day 0, 14:45 |
+| Is a demo video required for Track 2? | **Resolved: yes — public three-minute YouTube demo via Devpost** | 31 August 2026 |
 | What is the cutoff of the monthly item statistics file? | Same | Day 0, 14:45 |
 | Polars or pandas? | Malvika | Day 0 |
 | Is a GPU available to anyone on the team? | All | Day 0 |

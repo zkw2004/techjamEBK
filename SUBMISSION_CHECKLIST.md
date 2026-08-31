@@ -5,7 +5,23 @@ TechJam 2026, Track 2. Verified against `02_REQUIREMENTS.md` Part 5
 Re-run the commands under "Verify" yourself before submitting — this file is
 a snapshot, not a live check.
 
-## The 7 required deliverables
+## The 3 required Devpost submissions
+
+- [x] **Written description** → [`DEVPOST.md`](DEVPOST.md)
+      Covers the solution, measured results, limitations, dataset, APIs,
+      libraries, frameworks, and complete tech stack.
+- [ ] **Public code repository** → this repository
+      The code and comprehensive README are ready. Confirm GitHub visibility
+      is Public and paste the public repository URL into Devpost.
+- [ ] **Public three-minute YouTube demo** → [`WALKTHROUGH.md`](WALKTHROUGH.md)
+      The timed end-to-end script and deterministic recovery replay are ready.
+      Record, upload publicly or unlisted as permitted by the rules, verify the
+      runtime is no longer than 3:00, and paste the YouTube URL into Devpost.
+
+The seven items below are the evidence package supporting those three Devpost
+fields, not substitutes for the required repository or YouTube links.
+
+## Supporting evidence package
 
 - [x] **D1 — Devpost writeup** → [`DEVPOST.md`](DEVPOST.md)
       Real numbers as of the converged run: 21 nodes, accepted primary
@@ -67,9 +83,12 @@ git ls-files | grep -x '\.env' || echo "not tracked"
 - [ ] `git push origin main` — confirm `git status -sb` shows no
       `[ahead N]`
 - [ ] Repo visibility set to Public (D2, not machine-checkable)
-- [ ] Optional: `WALKTHROUGH.md` demo video — **not required for Track 2**
-      per `02_REQUIREMENTS.md`'s own note ("Tracks 3, 4 and 5 list a demo
-      video as a deliverable. Track 2's list does not.")
+- [ ] Record the mandatory demo from `WALKTHROUGH.md`, keeping the final edit
+      at or below 3:00
+- [ ] Upload the demo to YouTube and confirm the link opens in a signed-out
+      browser
+- [ ] Paste the written description, public repository URL, and YouTube URL
+      into Devpost, then preview the submission once before publishing
 
 ## What "final" means for this run
 

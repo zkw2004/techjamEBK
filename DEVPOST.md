@@ -1,5 +1,14 @@
 # Devpost submission draft
 
+## Required submission links
+
+- Public repository: `[PASTE PUBLIC GITHUB URL]`
+- Public three-minute YouTube demo: `[PASTE VERIFIED YOUTUBE URL]`
+
+Do not publish the Devpost entry until both placeholders are replaced and each
+link opens in a signed-out browser. The demo must show the working solution
+end-to-end and remain at or below three minutes.
+
 ## Inspiration
 
 Recommendation benchmarks often reward one final model while hiding the
