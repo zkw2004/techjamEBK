@@ -8,7 +8,22 @@ import sys
 import numpy as np
 import pytest
 
+from pipeline.data import DATA_DIR
 from pipeline.models.deepfm import DeepFMModel
+
+# The C9/C11/C12 end-to-end tests below call pipeline.train.run_experiment(),
+# which calls pipeline.data.load() for real -- unlike the rest of this file,
+# which drives DeepFMModel directly against synthetic arrays. CI's `tests`
+# job deliberately never fetches the (445MB, git-ignored) archive (see
+# .github/workflows/ci.yml's own comment: "No dataset needed"), so these two
+# must be gated the same way every other archive-dependent test in this repo
+# is (tests/test_data_split.py, tests/test_models.py) or they hard-fail on
+# every environment without the dataset -- which is exactly what turned
+# `main` red for five consecutive merges after they landed ungated.
+requires_kuairand_data = pytest.mark.skipif(
+    not (DATA_DIR / "video_features_basic_pure.csv").is_file(),
+    reason="requires the ignored KuaiRand-Pure archive; run `make data` locally",
+)
 
 # NOT imported at module scope: a top-level `import torch` loads torch into
 # the pytest *parent* at collection time, and every later forked child then
@@ -564,6 +579,7 @@ def test_c11_c12_reach_the_multitask_model_too():
     assert not np.allclose(plain, fit_once(senet=True))
 
 
+@requires_kuairand_data
 def test_c11_c12_run_through_run_experiment_end_to_end():
     """The full pipeline.train.run_experiment path, not the model in isolation:
     proves the hparams survive Config validation and _matrix construction."""
@@ -580,6 +596,7 @@ def test_c11_c12_run_through_run_experiment_end_to_end():
     assert result["status"] == "ok"
 
 
+@requires_kuairand_data
 def test_c9_real_run_experiment_smoke_completes_end_to_end():
     """The full pipeline.train.run_experiment integration, not just the model
     class in isolation — proves the AUX_TARGETS plumbing survives negative
