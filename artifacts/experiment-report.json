@@ -69,5 +69,17 @@
       "smoke": 3
     }
   },
-  "manual_intervention_definition": "A completed node whose manual_intervention field is true; automated proposals, bounded retries, and recovery actions are not interventions."
+  "manual_intervention_definition": "A completed node whose manual_intervention field is true; automated proposals, bounded retries, and recovery actions are not interventions.",
+  "judge_visibility": {
+    "candidate_count_diagnostics": {
+      "median_candidates_per_user": 4,
+      "gauc_usable_users_percent": 57.8,
+      "interpretation": "A +0.002 primary delta is material when users rank a median of four candidates and only 57.8% contribute to GAUC."
+    },
+    "controller_iterations": [],
+    "citations": [],
+    "latest_ablation": null,
+    "metric_inert_features": [],
+    "leakage_preflight": null
+  }
 }

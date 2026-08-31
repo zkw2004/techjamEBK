@@ -1,5 +1,13 @@
 # Experiment report
 
+## Evaluation context
+
+- Median candidates per user: **4**
+- GAUC-usable users: **57.8%**
+- Interpretation: A +0.002 primary delta is material when users rank a median of four candidates and only 57.8% contribute to GAUC.
+
+## Results
+
 | Node | Fidelity | Status | Accepted | GAUC | nDCG | Primary | Δ baseline |
 |---|---|---|---:|---:|---:|---:|---:|
 | n001 | smoke | ok | no | — | — | — | — |
@@ -19,3 +27,19 @@
 - Other iterations: 0
 
 Manual intervention means: A completed node whose manual_intervention field is true; automated proposals, bounded retries, and recovery actions are not interventions.
+
+## Search controller
+
+No iteration-controller events were recorded.
+
+## Latest ablation sensitivity
+
+No ablation sensitivity table was recorded.
+
+## Research citations
+
+No structured `[ref: ...]` citations were recorded.
+
+## Metric-inert features
+
+No metric-inert feature report was recorded.

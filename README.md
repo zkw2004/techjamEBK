@@ -60,6 +60,7 @@ make setup                       # deps + pre-commit hooks
 make data                        # fetch + checksum KuaiRand-Pure (45MB)
 cp .env.example .env             # add ANTHROPIC_API_KEY
 make check                       # what CI runs
+make preflight                   # independent leakage canaries
 ```
 
 `make data` is idempotent, so re-running it is a no-op once the dataset is

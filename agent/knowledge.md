@@ -71,7 +71,7 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 - **Empirical-Bayes smoothing** — Shrink sparse group rates toward the global
   rate with `(clicks + alpha * global_rate) / (impressions + alpha)`, fitting
   `alpha` on internal folds only.
-- ~~**Exposure debiasing (randomised slice)**~~ — **Impossible on this data.**
+- **Exposure debiasing (randomised slice)** — **Impossible on this data.**
   `is_rand` is 0 for all 1,141,112 training rows, so there is no unbiased slice
   and no estimable propensity. Do not propose IPS or exposure reweighting.
 - **Blending** — Combine continuous predictions from **exactly two** distinct
@@ -90,16 +90,23 @@ stopping, not blend weights, not EB hyperparameters. Use the internal folds.
 
 Each cost real compute; repeating one wastes an iteration.
 
-- **Single features do not beat the five official fields.** All 20 registered
-  features were tested one at a time on top of `FIELDS` at full tier with the
-  D12 rule (`scripts/feature_sweep.py`). Every one landed inside noise except
+- **The completed single-feature sweep is a boundary, not a verdict that
+  static or engineered features are a dead end.** All 20 features registered
+  at the time were tested one at a time on top of `FIELDS` with FM at full
+  tier (`scripts/feature_sweep.py`). Every one landed inside noise except
   `hour_of_day` (+0.001686) and `day_of_week` (+0.001635), whose CIs exclude
-  zero but which sit under the 0.002 floor. **Adding them together gives
-  +0.001644 — no better than either alone**, so they are redundant rather than
-  complementary. Feature *combinations* beyond that pair remain untested.
-- **`sim_to_history` carries no usable signal** (delta −0.000561, CI
-  [−0.001456, +0.001082]). That closes the user-history × candidate direction,
-  and DIN with it. Do not propose sequence models over user history.
+  zero but sit under the 0.002 floor; together they give +0.001644 and are
+  redundant. Do not repeat those exact FM experiments, but do consider new
+  **candidate-varying** features, interactions, and combinations. In
+  particular, B10's later `video_completion_ratio_hist` is per-video rather
+  than a user scalar and was not part of that sweep; it needs its own screen
+  and ablation evidence before the agent assigns it a prior.
+- **B14's specific `sim_to_history` implementation carries no usable signal**
+  at confirm tier (delta −0.000561, CI [−0.001456, +0.001082]). This triggers
+  the declared C10 go/no-go: do not build DIN on top of that representation.
+  It does **not** prove every possible user-history encoding or every
+  candidate-conditioned feature is useless; reopen the direction only when a
+  materially different cheap representation first clears the 0.002 gate.
 - **The per-user aggregates are `metric_inert`.** `user_ctr`, `user_activity`,
   `pcr_hist` and the `user_*_rate_decayed` family are `groupby("user_id")`
   values, identical across every candidate a user sees, so they cannot move a

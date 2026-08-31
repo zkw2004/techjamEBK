@@ -5,7 +5,9 @@ import json
 import pytest
 
 from tools.report import (
+    build_judge_visibility,
     build_report,
+    load_events,
     load_nodes,
     plot_trajectory,
     render_markdown,
@@ -94,3 +96,56 @@ def test_report_files_are_written_in_both_formats(tmp_path):
     assert written == [markdown, machine]
     assert markdown.read_text(encoding="utf-8").startswith("# Experiment report")
     assert json.loads(machine.read_text(encoding="utf-8"))["totals"]["nodes"] == 0
+
+
+def test_d14_renders_five_iterations_and_all_judge_visible_evidence(tmp_path):
+    nodes = [
+        {
+            "id": "n001",
+            "hypothesis": "Try BPR [ref: BPR — Rendle 2009]",
+            "ablation": {
+                "base_primary": 0.61,
+                "components": [
+                    {
+                        "component": "feature:video_id",
+                        "primary": 0.60,
+                        "delta": -0.01,
+                        "sensitivity": 0.01,
+                    }
+                ],
+            },
+        }
+    ]
+    events = [
+        {
+            "event": "iteration",
+            "strikes": index % 3,
+            "scheduler_forced": index == 3,
+            "hedges_fired": int(index >= 3),
+        }
+        for index in range(1, 6)
+    ]
+    screen = {
+        "features": {
+            "user_ctr": {"metric_inert": True},
+            "video_ctr": {"metric_inert": False},
+        }
+    }
+
+    visibility = build_judge_visibility(nodes, events, screen)
+    rendered = render_markdown(build_report(nodes, events=events, screen_report=screen))
+
+    assert len(visibility["controller_iterations"]) == 5
+    assert visibility["controller_iterations"][2]["scheduler_forced"] is True
+    assert visibility["metric_inert_features"] == ["user_ctr"]
+    assert "Median candidates per user: **4**" in rendered
+    assert "GAUC-usable users: **57.8%**" in rendered
+    assert "feature:video_id" in rendered
+    assert "BPR — Rendle 2009" in rendered
+    assert "`user_ctr`" in rendered
+
+
+def test_event_loader_tolerates_truncated_tail(tmp_path):
+    path = tmp_path / "run.jsonl"
+    path.write_text('{"event":"iteration","strikes":1}\n{"event":', encoding="utf-8")
+    assert load_events(path) == [{"event": "iteration", "strikes": 1}]
