@@ -511,11 +511,21 @@ class DeepFMMultiTask(DeepFMModel):
         self,
         aux_click_weight: float = 0.0,
         aux_like_weight: float = 0.0,
+        aux_click_fusion_weight: float = 0.0,
+        aux_like_fusion_weight: float = 0.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
         if aux_click_weight < 0 or aux_like_weight < 0:
             raise ValueError("aux head weights must be non-negative")
+        if aux_click_fusion_weight < 0 or aux_like_fusion_weight < 0:
+            raise ValueError("aux fusion weights must be non-negative")
+        # C13. Separate from the *training* weights above: a head can be worth
+        # training against without being worth reading at inference, and the two
+        # were measured to trade off differently. Both default 0, so predict()
+        # returns the long_view head alone exactly as C9 shipped it.
+        self.aux_click_fusion_weight = float(aux_click_fusion_weight)
+        self.aux_like_fusion_weight = float(aux_like_fusion_weight)
         # Optuna-tunable: both flow through Config.hparams -> **kwargs like
         # every other hparam (pipeline/tune.py's `_suggest` is generic over
         # hparam names, so a search_space entry for either needs no new code
@@ -632,9 +642,34 @@ class DeepFMMultiTask(DeepFMModel):
             self.network.load_state_dict(best_state)
 
     def predict(self, X) -> np.ndarray:
-        """Long_view head only -- the frozen interface (8.9) returns one
-        score per row, and the aux heads exist to shape training, not to be
-        read."""
+        """The long_view head, optionally fused with the auxiliary heads (C13).
+
+        With both fusion weights at 0 -- the default -- this is the long_view
+        head alone, exactly as before: the aux heads shape training and are not
+        read. Setting a weight turns C9's regularisers into ranking signal in
+        their own right, on the argument that a user's click and like
+        behaviour orders their candidates in a way the long_view head alone
+        does not capture.
+
+        Fusion is over **within-user ranks**, not raw logits, reusing C7's
+        `_within_user_ranks`. The heads are separately-trained sigmoid probes
+        with no shared calibration, so averaging their logits would let
+        whichever head happens to have the widest spread dominate the sum --
+        a scale artefact, not a preference. Ranks also cost nothing here,
+        because GAUC and nDCG@5 are invariant under any monotone transform of
+        the score (5.3), so rank-space output is exactly as valid as logits.
+
+        The frozen `predict(X) -> np.ndarray` contract (8.9) has no `user_ids`
+        parameter, so the user column is read off `X` by name -- the same route
+        LHUC uses for its gate. Ranking is therefore only possible when
+        `user_id` is among the features, and fusion refuses to run silently
+        without it.
+
+        Ranks are computed once over the whole matrix rather than per batch: a
+        user's rows can straddle a batch boundary, and per-batch ranking would
+        quietly rank each user against only the part of their candidate list
+        that landed in the same chunk.
+        """
         import torch
 
         if self.network is None:
@@ -644,14 +679,52 @@ class DeepFMMultiTask(DeepFMModel):
             raise ValueError("X must be two-dimensional with the fitted field count")
         encoded = torch.as_tensor(self._encode(X), dtype=torch.long)
         self.network.eval()
-        outputs = []
+        primary_batches: list = []
+        aux_batches: dict[str, list] = {name: [] for name in self.AUX_TARGETS}
         with torch.no_grad():
             for start in range(0, len(encoded), self.batch_size):
-                primary_logits, _aux = self.network(encoded[start : start + self.batch_size])
-                outputs.append(primary_logits.cpu())
-        if not outputs:
+                primary_logits, aux = self.network(encoded[start : start + self.batch_size])
+                primary_batches.append(primary_logits.cpu())
+                for name, values in aux.items():
+                    aux_batches[name].append(values.cpu())
+        if not primary_batches:
             return np.array([], dtype=np.float32)
-        return torch.cat(outputs).numpy()
+
+        primary = torch.cat(primary_batches).numpy()
+        if not self._fusion_weights():
+            return primary
+        aux_scores = {
+            name: torch.cat(batches).numpy()
+            for name, batches in aux_batches.items()
+            if batches
+        }
+        return self._fuse(primary, aux_scores, X)
+
+    def _fusion_weights(self) -> dict[str, float]:
+        """Non-zero fusion weights by aux target name; empty when fusion is off."""
+        weights = {
+            "is_click": self.aux_click_fusion_weight,
+            "is_like": self.aux_like_fusion_weight,
+        }
+        return {name: value for name, value in weights.items() if value > 0}
+
+    def _fuse(self, primary: np.ndarray, aux_scores: dict, X: np.ndarray) -> np.ndarray:
+        from pipeline.models.blend import _within_user_ranks
+
+        if "user_id" not in self.feature_names:
+            raise ValueError(
+                "aux fusion ranks candidates within a user and so requires a "
+                f"'user_id' field; got features {self.feature_names!r}"
+            )
+        users = X[:, self.feature_names.index("user_id")]
+        stack = [_within_user_ranks(primary, users, normalise=True)]
+        weights = [1.0]
+        for name, weight in self._fusion_weights().items():
+            if name not in aux_scores:
+                continue
+            stack.append(_within_user_ranks(aux_scores[name], users, normalise=True))
+            weights.append(float(weight))
+        return np.average(np.asarray(stack), axis=0, weights=np.asarray(weights))
 
     def _primary_validation_loss(self, X: np.ndarray, y: np.ndarray, loss_fn) -> float:
         import torch
