@@ -21,6 +21,10 @@ BASELINE_VALIDATION_PRIMARY = 0.6016  # test: 0.5946. Config: k=16, lr=0.001, ba
 # that GAUC/nDCG are ranking metrics while BCE optimises a global objective.
 SUPPORTED_LOSSES = frozenset({"pointwise", "pairwise"})
 
+# Quantile bins for a continuous feature, matching DeepFM's encoder so the two
+# models see the same discretisation of the same column.
+NUMERIC_BINS = 32
+
 
 @register("fm")
 class FM:
@@ -34,6 +38,7 @@ class FM:
         patience: int = 4,
         seed: int = 42,
         loss: str = "pointwise",
+        feature_names: list[str] | None = None,
         **hparams,
     ):
         if k <= 0 or lr <= 0 or l2 < 0:
@@ -50,7 +55,12 @@ class FM:
         self.batch_size = batch_size
         self.patience = patience
         self.seed = seed
-        self.vocabs: list[dict[object, int]] = []
+        # Already supplied by pipeline.train._new_model for every model; FM
+        # previously swallowed it into **hparams and ignored it, which is why
+        # it had no way to tell an identifier column from a continuous one.
+        self.feature_names = list(feature_names or [])
+        self.vocabs: list[dict[object, int] | None] = []
+        self.numeric_edges: list[np.ndarray | None] = []
         self.unknown_ids = np.array([], dtype=np.int32)
         self.offsets = np.array([], dtype=np.int32)
         self.V: np.ndarray | None = None
@@ -210,25 +220,104 @@ class FM:
         if y.ndim != 1 or len(X) != len(y) or not np.isfinite(y).all():
             raise ValueError(f"{name} labels must be finite with one value per row")
 
+    def _is_categorical(self, n_fields: int) -> list[bool]:
+        """Which columns get an exact-value vocabulary rather than bins.
+
+        Mirrors ``DeepFMModel._fit_encoder``'s rule exactly -- the five
+        official ``FIELDS`` are identifiers and stay categorical; every other
+        registered feature is a continuous statistic and gets quantile bins.
+
+        When no ``feature_names`` were supplied there is nothing to decide
+        from, so every column is categorical. That is the pre-existing
+        behaviour and keeps every direct ``FM(...)`` caller (the baseline
+        reproduction test included) byte-identical.
+        """
+        from pipeline.data import FIELDS
+
+        names = self.feature_names
+        if not names:
+            return [True] * n_fields
+        return [
+            index >= len(names) or names[index] in FIELDS for index in range(n_fields)
+        ]
+
     def _fit_encoder(self, X: np.ndarray) -> None:
-        self.vocabs = [dict() for _ in range(X.shape[1])]
-        for row in X:
-            for field, value in enumerate(row):
-                vocab = self.vocabs[field]
-                if value not in vocab:
-                    vocab[value] = len(vocab)
-        field_dims = np.asarray([len(vocab) + 1 for vocab in self.vocabs], dtype=np.int32)
-        self.unknown_ids = field_dims - 1
-        self.offsets = np.cumsum(np.r_[0, field_dims[:-1]]).astype(np.int32)
+        """Vocabularies for identifier columns, quantile edges for the rest.
+
+        Without the numeric branch FM memorises raw floats as categories: a
+        continuous feature such as ``pcr_hist`` produced ~1.0M distinct values
+        over 1.14M training rows, so its embeddings averaged one observation
+        each and **100%** of validation rows fell through to the single
+        unknown bucket -- the feature contributed a constant at scoring time
+        after polluting training with a million noise vectors that the
+        second-order term mixes into every real field. Measured cost of that
+        on `sim_to_history`: -0.0052 primary, a 95% CI entirely below zero.
+        Thirteen of the ~20 registered features were affected, eight of them
+        at 100% unseen. See ``tests/test_models.py::test_fm_bins_*``.
+        """
+        n_fields = X.shape[1]
+        categorical = self._is_categorical(n_fields)
+        self.vocabs = []
+        self.numeric_edges = []
+        field_dims = []
+        for field in range(n_fields):
+            if categorical[field]:
+                vocab: dict[object, int] = {}
+                for value in X[:, field]:
+                    if value not in vocab:
+                        vocab[value] = len(vocab)
+                self.vocabs.append(vocab)
+                self.numeric_edges.append(None)
+                field_dims.append(len(vocab) + 1)  # +1 slot for unseen values
+                continue
+            values = self._numeric_column(X, field)
+            # `unique` collapses repeated edges, so a column with fewer than
+            # NUMERIC_BINS distinct values keeps one bin per value rather than
+            # gaining empty ones.
+            edges = np.unique(
+                np.quantile(values, np.linspace(0, 1, NUMERIC_BINS + 1)[1:-1])
+            )
+            self.vocabs.append(None)
+            self.numeric_edges.append(edges)
+            # searchsorted yields 0..len(edges) inclusive, so len(edges)+1 bins
+            # cover every possible value and no unknown slot is needed: a value
+            # outside the training range lands in the nearest end bin, which is
+            # the behaviour we want from an ordinal feature.
+            field_dims.append(len(edges) + 1)
+        dims = np.asarray(field_dims, dtype=np.int32)
+        self.unknown_ids = dims - 1
+        self.offsets = np.cumsum(np.r_[0, dims[:-1]]).astype(np.int32)
+
+    def _numeric_column(self, X: np.ndarray, field: int) -> np.ndarray:
+        name = (
+            self.feature_names[field]
+            if self.feature_names and field < len(self.feature_names)
+            else f"field_{field}"
+        )
+        try:
+            values = np.asarray(X[:, field], dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"feature {name!r} is not one of the categorical FIELDS, so FM "
+                "bins it as a continuous column, but its values are not numeric"
+            ) from exc
+        if not np.isfinite(values).all():
+            raise ValueError(f"numeric feature {name!r} must be finite")
+        return values
 
     def _encode(self, X: np.ndarray) -> np.ndarray:
         encoded = np.empty(X.shape, dtype=np.int32)
-        for row_index, row in enumerate(X):
-            for field, value in enumerate(row):
-                encoded[row_index, field] = (
-                    self.vocabs[field].get(value, int(self.unknown_ids[field]))
-                    + self.offsets[field]
+        for field in range(X.shape[1]):
+            vocab = self.vocabs[field]
+            offset = int(self.offsets[field])
+            if vocab is None:
+                values = self._numeric_column(X, field)
+                encoded[:, field] = (
+                    np.searchsorted(self.numeric_edges[field], values) + offset
                 )
+                continue
+            unknown = int(self.unknown_ids[field])
+            encoded[:, field] = [vocab.get(value, unknown) + offset for value in X[:, field]]
         return encoded
 
     def _initialise_parameters(self, dimension: int) -> None:
