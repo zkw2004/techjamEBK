@@ -28,6 +28,12 @@ from agent.schema import FAMILIES, SUPPORTED_LOSSES, Action
 # headroom; the official five fields plus a loss swap is 6 variants.
 MAX_VARIANTS = 8
 
+# Boolean hparams that switch an architectural block on, each independently
+# ablatable by switching it back off. Both are identity-at-initialisation
+# (pipeline/models/deepfm.py), so the off-variant is the same network minus that
+# one mechanism rather than a differently-initialised one.
+ARCHITECTURE_BLOCKS = ("lhuc", "senet")
+
 ABLATION_HYPOTHESIS = (
     "Ablation probe of the incumbent: measure how much each component "
     "contributes, so the next proposal targets the sensitive one."
@@ -77,6 +83,17 @@ def ablation_variants(
     alternative = next((option for option in supported if option != current), None)
     if alternative is not None:
         variants.append((f"loss:{alternative}", {**config, "loss": alternative}))
+
+    # Architectural blocks that are off by default and switched on by an hparam
+    # (C11 LHUC, C12 SENet). Only an *enabled* block is worth a variant: turning
+    # one off measures what it contributes, whereas turning an absent one on
+    # would be proposing a new experiment, which is not what an ablation is for.
+    hparams = config.get("hparams") or {}
+    for block in ARCHITECTURE_BLOCKS:
+        if hparams.get(block):
+            variants.append(
+                (f"block:{block}", {**config, "hparams": {**hparams, block: False}})
+            )
 
     # For a blend, "dropping a member" cannot stay a blend — the runner requires
     # exactly two parents. The measurable question is what each parent scores

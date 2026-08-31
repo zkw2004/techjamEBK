@@ -177,3 +177,33 @@ def test_unused_features_does_not_re_suggest_a_measured_inert_feature():
     }
 
     assert "user_ctr" not in ablate.unused_features(table, {"features": []})
+
+
+def test_architecture_blocks_are_ablatable_when_enabled():
+    """C11/C12: an enabled block must appear as its own ablation variant, so the
+    sensitivity table can report what it contributes."""
+    from agent.ablate import ablation_variants
+
+    variants = dict(ablation_variants(
+        {"model": "deepfm", "features": ["user_id", "video_id"],
+         "hparams": {"lhuc": True, "senet": True, "emb_dim": 8}}
+    ))
+
+    assert variants["block:lhuc"]["hparams"]["lhuc"] is False
+    assert variants["block:senet"]["hparams"]["senet"] is False
+    # Ablating one block must leave the other, and every unrelated hparam, alone.
+    assert variants["block:lhuc"]["hparams"]["senet"] is True
+    assert variants["block:lhuc"]["hparams"]["emb_dim"] == 8
+
+
+def test_disabled_architecture_blocks_produce_no_variant():
+    """Turning an absent block *on* would be proposing a new experiment, which
+    is not what an ablation measures."""
+    from agent.ablate import ablation_variants
+
+    variants = dict(ablation_variants(
+        {"model": "deepfm", "features": ["user_id", "video_id"],
+         "hparams": {"lhuc": False}}
+    ))
+
+    assert not [name for name in variants if name.startswith("block:")]
