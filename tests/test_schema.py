@@ -96,11 +96,16 @@ def test_losses_each_model_really_implements_are_accepted():
     assert Config.model_validate({"model": "lgbm", "loss": "lambdarank"}).loss == "lambdarank"
 
 
-def test_unimplemented_model_is_rejected_at_proposal_time():
-    """deepfm_mtl is in MODEL_REGISTRY but raises NotImplementedError on
-    construction; a run wasted iterations rediscovering that twice."""
-    with pytest.raises(ValidationError, match="not implemented"):
-        Config.model_validate({"model": "deepfm_mtl"})
+def test_unimplemented_models_set_is_empty_now_that_c9_landed():
+    """deepfm_mtl was the one entry in UNIMPLEMENTED_MODELS (a run wasted
+    iterations rediscovering its NotImplementedError twice). C9 implemented
+    it (pipeline/models/deepfm.py::DeepFMMultiTask), so the gate must accept
+    it now — an empty set is kept, not deleted, as the obvious place to add
+    a future stub."""
+    from agent.schema import UNIMPLEMENTED_MODELS
+
+    assert UNIMPLEMENTED_MODELS == frozenset()
+    Config.model_validate({"model": "deepfm_mtl"})  # must not raise
 
 
 def test_blend_requires_exactly_two_distinct_parents():
