@@ -12,7 +12,31 @@ repos:
     rev: v1.5.0
     hooks:
       - id: detect-secrets
-        args: ["--baseline", ".secrets.baseline"]
+        # Every node record carries the run manifest's SHA-256 (Section 8.3),
+        # and the ledger is a committed deliverable — so a 64-hex content hash
+        # lands in git on every iteration and trips the "Hex High Entropy
+        # String" detector. That is a false positive, but an unavoidable and
+        # *recurring* one: it turned main red for five consecutive commits and
+        # would do so for every node the loop ever writes, which trains the
+        # team to ignore a secrets gate that exists to catch real leaks.
+        #
+        # Excluded by line pattern rather than by file, so everything else in
+        # a node record — hypotheses, configs, tracebacks — is still scanned.
+        # The same applies to the run manifest itself, which fingerprints the
+        # evaluator, the submit checker and the data (Section 8.3). Only these
+        # named hash fields are exempt — a bare 64-hex string anywhere else is
+        # still reported.
+        #
+        # This replaces the --baseline .secrets.baseline approach main used
+        # briefly: a baseline only records specific already-seen hashes (it
+        # named n001-n005 by content, not by shape), so every new node still
+        # needed someone to re-run `detect-secrets scan`+`audit` and commit an
+        # updated baseline alongside it — exactly the red-CI/five-commits
+        # problem above, not a fix for it. .secrets.baseline is stale now and
+        # can be deleted in a follow-up; nothing references it any more.
+        args:
+          - --exclude-lines
+          - '"(manifest|evaluator|submit_checker|data)_sha256": "[0-9a-f]{64}"'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

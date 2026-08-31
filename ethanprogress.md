@@ -37,7 +37,7 @@ estimates explicitly rather than presenting them as measured speedups.
 | C4b Generated features | Complete locally | `pipeline/codegen.py`: syntax → schema → leakage → smoke → screen → full gauntlet; safe `user_author_affinity` accepted end to end, leaky twin quarantined by the dynamic probe. 8 tests. |
 | C4 LightGBM | Complete locally; runnable only after the OpenMP fix | Pointwise and LambdaRank both pass real internal-fold screens; group sorting, original prediction order, deterministic encoding, and fold-selected refit budgets are tested. Real full-tier `0.599210` pointwise / `0.597906` LambdaRank — both **below** the FM baseline, see the ladder note below. |
 | C5 DeepFM | Complete locally | Deterministic CPU model uses patience `1` and the O(n) interaction identity; a one-epoch real screen completed in `5.61s`. |
-| C6 Optuna | **Complete — gate met** | Real 20-trial study, 11 pruned, **36.87% saved** (gate ≥30%), best value `0.5764`. Owner-kill/resume and bounded native-failure containment tested. A-side dispatch still pending (Kaiwen). |
+| C6 Optuna | **Gate NOT met — earlier claim retracted** | Ground-truth wall clock: unpruned 568.2s vs pruned 433.7s = **23.67% real reduction**, below the 30% gate. The estimator reports 37.59%, overstating by ~14 points. See "C6 gate claim retracted". Owner-kill/resume and bounded native-failure containment tested. A-side dispatch still pending (Kaiwen). |
 | C7 Blending | **Complete — validated on real data** | Four methods, all C1 tiers, parent/fold/official/bootstrap gates, cache provenance and C3b evidence integration tested. Real parents FM `0.601684` / LGBM `0.599210`, Spearman `0.8564` (the 0.7-0.9 sweet spot). Best blend `logit_avg` `0.602198` correctly refused: +0.000514 is inside the 0.002 margin. |
 
 ## Critical fix: OpenMP backend isolation (2026-08-30)
@@ -203,7 +203,50 @@ precisely what the Section 7.2 trust boundary forbids. They are removed from
 the repository. `tools/make_blend_parents.py` regenerates them into a
 temporary store on demand and refuses to write into `logs/`.
 
-## C6 pruning gate met, 2026-08-30
+## C6 gate claim RETRACTED, 2026-08-31
+
+**The 36.87% figure below is wrong, and the gate is not met.** It came from
+the estimator this same work modified, which was never checked against an
+independent measurement. An audit ran the identical 20-trial study twice —
+once with `NopPruner`, once with `MedianPruner` — and compared wall clock:
+
+```text
+UNPRUNED  wall = 568.2s
+PRUNED    wall = 433.7s
+GROUND TRUTH wall-clock reduction = 23.67%
+CLAIMED (estimator)               = 37.59%
+discrepancy                       = +13.92 points
+```
+
+Real saving is **~23.7%, below the 30% gate**. Three corrections follow.
+
+**The stated rationale was empirically false.** The per-fold-index estimator
+was justified by arguing that expanding windows make fold 3 much costlier
+than fold 1. Measured cost by index is `10.028 / 10.504 / 10.599s` — a 5.7%
+spread, well inside the ~22% run-to-run variation. The estimator is
+marginally more correct but nearly inert; the real driver of the improvement
+was lowering `n_startup_trials` from 5 to 3, which raised pruned trials from
+8 to 11.
+
+**Probable cause of the overstatement.** Skipped folds are priced at the
+*global* mean fold cost across completed trials. But a trial is pruned for
+being bad, and bad configurations here tend to be cheap — `max_epochs` is in
+the search space, so a low-epoch trial both scores worse and runs faster.
+Pricing a cheap trial's skipped folds at the average credits it with savings
+it never had. A trial-relative estimator (scale the trial's own observed fold
+cost by the fold-index ratio) should remove this bias.
+
+**One anomaly left open.** The unpruned study reports
+`measured_trial_seconds` of 3103.5s against a 568.2s wall clock (5.5x), while
+the pruned study is exact (433.6s vs 433.7s). A controlled synthetic study
+reproduces neither — it accounts correctly at 0.93x. Unexplained; recorded
+rather than guessed at.
+
+Caveat on the ground truth itself: pruning changes what TPE samples next, so
+the two studies do not execute identical trials. The comparison is
+directionally sound but not perfectly controlled.
+
+## C6 pruning gate met, 2026-08-30 — SUPERSEDED, see the retraction above
 
 The study was saving 19.04% against a 30% acceptance criterion. Instrumenting
 a real study showed the shortfall had two causes, one an accounting error and
