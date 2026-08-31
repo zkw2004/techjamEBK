@@ -217,6 +217,9 @@
     "tokens_out": 7846,
     "tokens": 40642,
     "gpu_hours": 0.0,
+    "agent_wall_clock_seconds": 506.0,
+    "iterations_used": 12,
+    "iteration_cap": 50,
     "manual_interventions": 0
   },
   "iterations": {
@@ -406,16 +409,7 @@
         }
       ]
     },
-    "metric_inert_features": [
-      "pcr_hist",
-      "user_activity",
-      "user_click_rate_decayed",
-      "user_ctr",
-      "user_ctr_decayed",
-      "user_follow_rate_decayed",
-      "user_like_rate_decayed",
-      "user_long_view_rate_decayed"
-    ],
+    "metric_inert_features": [],
     "leakage_preflight": null
   }
 }

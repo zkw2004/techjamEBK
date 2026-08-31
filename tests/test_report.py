@@ -47,7 +47,8 @@ def test_report_aggregates_results_resources_and_iteration_tiers(tmp_path):
     assert report["results"][1]["delta_vs_baseline"] == pytest.approx(0.0134)
     assert report["totals"] == {
         "nodes": 2, "tokens_in": 200, "tokens_out": 50, "tokens": 250,
-        "gpu_hours": 0.5, "manual_interventions": 1,
+        "gpu_hours": 0.5, "agent_wall_clock_seconds": 0.0,
+        "iterations_used": 0, "iteration_cap": 50, "manual_interventions": 1,
     }
     assert report["iterations"] == {
         "pilot": 1, "full": 1, "other": 0,
@@ -149,3 +150,23 @@ def test_event_loader_tolerates_truncated_tail(tmp_path):
     path = tmp_path / "run.jsonl"
     path.write_text('{"event":"iteration","strikes":1}\n{"event":', encoding="utf-8")
     assert load_events(path) == [{"event": "iteration", "strikes": 1}]
+
+
+def test_resource_report_includes_wall_clock_and_iteration_cap():
+    nodes = [
+        {"id": "n001", "timestamp": "2026-08-31T13:57:37Z"},
+        {"id": "n002", "timestamp": "2026-08-31T14:05:44Z"},
+    ]
+    events = [
+        {"event": "iteration", "timestamp": "2026-08-31T14:00:01Z"},
+        {"event": "iteration", "timestamp": "2026-08-31T14:06:03Z"},
+    ]
+
+    report = build_report(nodes, events=events)
+    rendered = render_markdown(report)
+
+    assert report["totals"]["agent_wall_clock_seconds"] == 506
+    assert report["totals"]["iterations_used"] == 2
+    assert report["totals"]["iteration_cap"] == 50
+    assert "Agent wall-clock: 00:08:26 (506 seconds)" in rendered
+    assert "Iterations used: 2 / 50" in rendered

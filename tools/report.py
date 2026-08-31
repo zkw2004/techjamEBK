@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 from collections import Counter
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,27 @@ def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
 
 
+def _elapsed_seconds(nodes: list[dict[str, Any]], events: list[dict[str, Any]]) -> float:
+    """Elapsed agent-run wall-clock from the earliest to latest recorded event."""
+    timestamps = []
+    for record in [*nodes, *events]:
+        value = record.get("timestamp")
+        if not isinstance(value, str):
+            continue
+        try:
+            timestamps.append(datetime.fromisoformat(value.replace("Z", "+00:00")))
+        except ValueError:
+            continue
+    return max(0.0, (max(timestamps) - min(timestamps)).total_seconds()) if timestamps else 0.0
+
+
+def _duration(seconds: float) -> str:
+    total = max(0, round(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{remaining_seconds:02d}"
+
+
 def build_report(
     nodes: list[dict[str, Any]],
     *,
@@ -152,6 +174,7 @@ def build_report(
     screen_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build every D7 deliverable from node JSON alone."""
+    event_rows = events or []
     results = []
     for node in nodes:
         metrics = node.get("metrics") if isinstance(node.get("metrics"), dict) else {}
@@ -189,6 +212,9 @@ def build_report(
             "tokens_out": token_out,
             "tokens": token_in + token_out,
             "gpu_hours": sum(_number(node.get("gpu_seconds")) for node in nodes) / 3600.0,
+            "agent_wall_clock_seconds": _elapsed_seconds(nodes, event_rows),
+            "iterations_used": sum(event.get("event") == "iteration" for event in event_rows),
+            "iteration_cap": 50,
             "manual_interventions": sum(
                 bool(node.get("manual_intervention", False)) for node in nodes
             ),
@@ -257,6 +283,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- Nodes: {totals['nodes']}",
             f"- Tokens: {totals['tokens']} ({totals['tokens_in']} in, {totals['tokens_out']} out)",
             f"- GPU-hours: {totals['gpu_hours']:.6f}",
+            f"- Agent wall-clock: {_duration(totals['agent_wall_clock_seconds'])} "
+            f"({totals['agent_wall_clock_seconds']:.0f} seconds)",
+            f"- Iterations used: {totals['iterations_used']} / {totals['iteration_cap']}",
             f"- Manual interventions: {totals['manual_interventions']}",
             f"- Pilot iterations: {iterations['pilot']}",
             f"- Full/confirm iterations: {iterations['full']}",

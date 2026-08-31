@@ -5,29 +5,29 @@ TechJam 2026, Track 2. Verified against `02_REQUIREMENTS.md` Part 5
 Re-run the commands under "Verify" yourself before submitting — this file is
 a snapshot, not a live check.
 
-## The 3 required Devpost submissions
+## The 4 required deliverable groups
 
-- [x] **Written description** → [`DEVPOST.md`](DEVPOST.md)
+- [x] **Written project description via Devpost** → [`DEVPOST.md`](DEVPOST.md)
       Covers the solution, measured results, limitations, dataset, APIs,
       libraries, frameworks, and complete tech stack.
-- [ ] **Public code repository** → this repository
+- [ ] **Public code/GitHub repository** → this repository
       The code and comprehensive README are ready. Confirm GitHub visibility
       is Public and paste the public repository URL into Devpost.
-- [ ] **Public three-minute YouTube demo** → [`WALKTHROUGH.md`](WALKTHROUGH.md)
-      The timed end-to-end script and deterministic recovery replay are ready.
-      Record, upload publicly or unlisted as permitted by the rules, verify the
-      runtime is no longer than 3:00, and paste the YouTube URL into Devpost.
+- [x] **Run and iteration logs** → [`logs/nodes/`](logs/nodes/) and
+      [`logs/run.jsonl`](logs/run.jsonl)
+- [x] **Final submission, results, and resources** → [`submission.csv`](submission.csv),
+      [`DELIVERABLES.md`](DELIVERABLES.md), and
+      [`artifacts/experiment-report.md`](artifacts/experiment-report.md)
 
-The seven items below are the evidence package supporting those three Devpost
-fields, not substitutes for the required repository or YouTube links.
+The seven items below are the evidence package supporting those four groups.
 
 ## Supporting evidence package
 
 - [x] **D1 — Devpost writeup** → [`DEVPOST.md`](DEVPOST.md)
       Real numbers as of the converged run: 21 nodes, accepted primary
       0.601684, best non-promoted candidate +0.000816 (CI excludes zero,
-      under the 0.002 floor), 40,642 tokens, 0 GPU-hours, 0 manual
-      interventions.
+      under the 0.002 floor), 40,642 tokens, 8m26s agent wall-clock,
+      12/50 iterations, 0 GPU-hours, 0 manual interventions.
 
 - [x] **D2 — Public GitHub repo** → this repo
       README has `## Contributions` and `## Limitations` sections.
@@ -50,8 +50,8 @@ fields, not substitutes for the required repository or YouTube links.
       baseline, in a table.
 
 - [x] **D6 — Resource report** → [`artifacts/experiment-report.md`](artifacts/experiment-report.md)
-      Total tokens (in/out) and GPU-hours across every LLM call and
-      training run.
+      Total tokens (in/out), agent wall-clock, iterations used out of 50, and
+      GPU-hours across the converged run.
 
 - [x] **D7 — Secret hygiene** → verified below
       `.env` never committed; not present anywhere in git history.
@@ -83,12 +83,13 @@ git ls-files | grep -x '\.env' || echo "not tracked"
 - [ ] `git push origin main` — confirm `git status -sb` shows no
       `[ahead N]`
 - [ ] Repo visibility set to Public (D2, not machine-checkable)
-- [ ] Record the mandatory demo from `WALKTHROUGH.md`, keeping the final edit
-      at or below 3:00
-- [ ] Upload the demo to YouTube and confirm the link opens in a signed-out
-      browser
-- [ ] Paste the written description, public repository URL, and YouTube URL
-      into Devpost, then preview the submission once before publishing
+- [ ] Recommended: record the approximately three-minute demo from
+      `WALKTHROUGH.md` if it helps explain the solution effectively
+- [ ] If a video is included, upload it to YouTube and confirm the link opens
+      in a signed-out browser before adding it to Devpost
+- [ ] Paste the written description and public repository URL into Devpost,
+      attach the logs/results/submission requested by the form, and preview it
+      once before publishing
 
 ## What "final" means for this run
 

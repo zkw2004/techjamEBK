@@ -1,10 +1,9 @@
 # Three-minute walkthrough runbook
 
-This is the required public three-minute YouTube demo runbook. Record at 1080p
-with terminal text large enough to read, keep the final runtime at or below
-3:00, and verify the uploaded link while signed out before pasting it into
-Devpost. Keep a local capture as the fallback instead of depending on live
-network/API access during judging.
+Track 2 does not require a video, but an approximately three-minute demo is
+recommended when it helps explain the solution. This runbook is ready to
+record at 1080p with readable terminal text. Keep a local capture as the
+fallback instead of depending on live network/API access during judging.
 
 ## Before recording
 
@@ -73,6 +72,5 @@ python -m tools.live
 - Confirm the trajectory and submission checker were generated from the same
   manifest-stamped run.
 - End on the resource/intervention card, not an unverified hidden-test claim.
-- Export at 1080p, confirm the final runtime is no longer than 3:00, upload to
-  YouTube, and test the public/unlisted link in a signed-out browser.
-- Paste the verified YouTube URL into both Devpost and the submission checklist.
+- If submitting the recommended video, export at 1080p, keep it around three
+  minutes, and test the public/unlisted YouTube link while signed out.

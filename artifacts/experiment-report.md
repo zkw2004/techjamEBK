@@ -37,6 +37,8 @@
 - Nodes: 21
 - Tokens: 40642 (32796 in, 7846 out)
 - GPU-hours: 0.000000
+- Agent wall-clock: 00:08:26 (506 seconds)
+- Iterations used: 12 / 50
 - Manual interventions: 0
 - Pilot iterations: 17
 - Full/confirm iterations: 4
@@ -89,4 +91,4 @@ Latest table: node `n003`; base primary 0.574109.
 
 ## Metric-inert features
 
-`pcr_hist`, `user_activity`, `user_click_rate_decayed`, `user_ctr`, `user_ctr_decayed`, `user_follow_rate_decayed`, `user_like_rate_decayed`, `user_long_view_rate_decayed`
+No metric-inert feature report was recorded.

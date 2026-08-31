@@ -28,7 +28,7 @@ generation. Day-0 contract checks and baseline reproduction are recorded in
 | Nodes | 21, stop reason `converged` |
 | Accepted | 1 — the seeded FM baseline anchor, validation primary **0.601684** |
 | Best measured, *not* promoted | FM with BPR pairwise loss: **+0.000816** over the anchor at 5-seed confirm tier, 95% CI **[+0.000193, +0.003474]** |
-| Resources | 40,642 LLM tokens (32,796 in / 7,846 out), 0 GPU-hours |
+| Resources | 40,642 LLM tokens (32,796 in / 7,846 out), 8m26s agent wall-clock, 12/50 iterations, 0 GPU-hours |
 | Manual interventions | **0** |
 | Submission | [`submission.csv`](submission.csv), 170,588 rows, passes the organiser's `submit.py --check` |
 
@@ -239,9 +239,9 @@ The output has exactly `row_id,user_id,video_id,score`; `row_id` is the
 positional index from `pipeline.data.load()`, never a join on user/video
 pairs.
 
-For the required public three-minute YouTube demo,
-[WALKTHROUGH.md](WALKTHROUGH.md) provides the timed end-to-end shot list and a
-safe deterministic OOM-recovery replay:
+Although Track 2 does not require a video, the recommended approximately
+three-minute walkthrough in [WALKTHROUGH.md](WALKTHROUGH.md) provides a timed
+end-to-end shot list and a safe deterministic OOM-recovery replay:
 
 ```bash
 python -m tools.oom_demo

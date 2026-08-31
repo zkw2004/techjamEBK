@@ -1,13 +1,13 @@
 # Devpost submission draft
 
-## Required submission links
+## Submission links
 
 - Public repository: `[PASTE PUBLIC GITHUB URL]`
-- Public three-minute YouTube demo: `[PASTE VERIFIED YOUTUBE URL]`
+- Optional recommended demo: `[PASTE VERIFIED YOUTUBE URL OR REMOVE THIS LINE]`
 
-Do not publish the Devpost entry until both placeholders are replaced and each
-link opens in a signed-out browser. The demo must show the working solution
-end-to-end and remain at or below three minutes.
+Do not publish the Devpost entry until the repository placeholder is replaced
+and opens in a signed-out browser. Track 2 does not require a video; include
+the recommended approximately three-minute demo only if it improves clarity.
 
 ## Inspiration
 
@@ -102,8 +102,9 @@ native backends in one worker.
   effect, excluding zero, that nonetheless falls under the project's
   `MIN_DELTA_FLOOR = 0.002` (≈2.5× the measured 0.0008 seed-noise floor).
   We report it as a verified non-win rather than round it up.
-- **0 GPU-hours** (CPU-only models throughout), **40,642 LLM tokens**
-  (32,796 in / 7,846 out) across the whole run.
+- **8m26s total agent wall-clock**, **12 of 50 iterations**, **0 GPU-hours**
+  (CPU-only models throughout), and **40,642 LLM tokens** (32,796 in /
+  7,846 out) across the whole run.
 - **0 manual interventions** — the operator definition (restarting a
   crashed process, editing code mid-run, killing a hung run, hand-picking a
   candidate) never fired; one screen-tier node hit a schema error and was
