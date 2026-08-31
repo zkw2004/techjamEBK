@@ -173,3 +173,31 @@ def test_user_ctr_decayed_rejects_overlapping_windows_and_handles_empty_target(d
         user_ctr_decayed(train_df, overlapping)
 
     assert user_ctr_decayed(train_df, target_df.iloc[0:0]).shape == (0,)
+
+
+def test_user_ctr_decayed_builds_a_strictly_historical_training_matrix():
+    """Its registered training-matrix path must not leak later row labels.
+
+    ``pipeline.train._matrix`` calls every registered feature with the same
+    frame twice when constructing the fit matrix. This regression protects
+    the path that previously raised during the leakage audit and caused the
+    feature sweep to quarantine ``user_ctr_decayed``.
+    """
+    frame = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u1", "u2"],
+            "date": [20220407, 20220408, 20220408, 20220409],
+            "time_ms": [100, 200, 200, 300],
+            "long_view": [1, 0, 1, 0],
+        }
+    )
+
+    result = user_ctr_decayed(frame, frame)
+    changed_future = frame.assign(long_view=[1, 1, 0, 1])
+
+    # The first event has no history; equal-time rows cannot see each other.
+    np.testing.assert_allclose(result[:3], [0.5, 1.0, 1.0])
+    # Changing outcomes at/after 200 cannot affect the first row's feature.
+    assert user_ctr_decayed(changed_future, changed_future)[0] == pytest.approx(result[0])
+    assert result.shape == (len(frame),)
+    assert np.isfinite(result).all()

@@ -156,9 +156,8 @@ def test_user_long_view_rate_decayed_matches_user_ctr_decayed_on_cross_frame_pat
     np.testing.assert_allclose(result, expected)
 
 
-def test_user_ctr_decayed_has_no_in_sample_support_unlike_its_b11_counterpart():
-    """Regression-documentation: this is *why* user_long_view_rate_decayed
-    is not a plain delegate to user_ctr_decayed."""
+def test_user_ctr_decayed_and_b11_counterpart_share_safe_in_sample_support():
+    """Both aliases support the registered training-matrix call pattern."""
     frame = pd.DataFrame(
         {
             "user_id": ["u1", "u1"],
@@ -167,13 +166,11 @@ def test_user_ctr_decayed_has_no_in_sample_support_unlike_its_b11_counterpart():
             "long_view": [1, 0],
         }
     )
-    with pytest.raises(ValueError, match="strictly earlier"):
-        user_ctr_decayed(frame, frame)
-
-    # The B11 feature, built on the shared in-sample-aware helper, handles it.
-    result = user_long_view_rate_decayed(frame, frame)
+    result = user_ctr_decayed(frame, frame)
+    counterpart = user_long_view_rate_decayed(frame, frame)
     assert result.shape == (2,)
     assert np.isfinite(result).all()
+    np.testing.assert_allclose(result, counterpart)
 
 
 # --- Leakage guard coverage (one per signal, both granularities) -----------

@@ -382,6 +382,31 @@ def test_matrix_derives_duration_bucket_from_training_quantiles():
     np.testing.assert_array_equal(matrix[:, 0], [0, 1, 9])
 
 
+def test_matrix_accepts_user_ctr_decayed_for_the_training_frame():
+    """A registered feature must work on `_matrix(train, train, ...)`.
+
+    Before the B5 in-sample history path existed, this exact call made the
+    leakage audit wrap a date-overlap ValueError as ``FeatureLeakError``.
+    That was a fail-closed false positive, not evidence that the feature read
+    a target outcome.
+    """
+    import pipeline.train as train
+
+    frame = pd.DataFrame(
+        {
+            "user_id": ["u1", "u1", "u2"],
+            "date": [20220407, 20220408, 20220409],
+            "time_ms": [100, 200, 300],
+            "long_view": [1, 0, 1],
+        }
+    )
+
+    matrix = train._matrix(frame, frame, ["user_ctr_decayed"])
+
+    assert matrix.shape == (3, 1)
+    assert np.isfinite(matrix).all()
+
+
 def test_runner_uses_b3_public_feature_resolver(monkeypatch):
     import pipeline.features as features
     import pipeline.train as train
