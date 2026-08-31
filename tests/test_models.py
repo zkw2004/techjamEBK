@@ -664,3 +664,108 @@ def test_fm_pairwise_needs_both_classes_within_the_same_user():
 def test_fm_rejects_a_loss_it_does_not_implement():
     with pytest.raises(ValueError, match="FM loss must be one of"):
         FM(loss="lambdarank")
+
+
+# --- FM continuous-feature encoding --------------------------------------
+#
+# FM's encoder was categorical-only: it built an exact-value vocabulary over
+# every column, so a continuous feature was memorised value-by-value. Measured
+# on the real split before the fix: pcr_hist produced 1,003,882 distinct values
+# over 1.14M training rows with 100% of validation rows unseen, and
+# sim_to_history cost -0.0052 primary with a 95% CI entirely below zero.
+
+def _mixed_matrix(n: int = 400):
+    """Two identifier columns plus one continuous column, as `_matrix` builds."""
+    rng = np.random.default_rng(0)
+    users = np.asarray([f"u{i % 40}" for i in range(n)], dtype=object)
+    videos = np.asarray([f"v{i % 25}" for i in range(n)], dtype=object)
+    # Distinct float per row -- the shape that broke the old encoder.
+    continuous = np.asarray(rng.random(n), dtype=object)
+    return np.column_stack([users, videos, continuous]).astype(object)
+
+
+_MIXED_NAMES = ["user_id", "video_id", "video_ctr"]
+
+
+def test_fm_bins_a_continuous_feature_instead_of_memorising_it():
+    from pipeline.models.fm import NUMERIC_BINS
+
+    X = _mixed_matrix()
+    model = FM(seed=0, feature_names=_MIXED_NAMES)
+
+    model._fit_encoder(X)
+
+    assert model.vocabs[0] is not None and model.vocabs[1] is not None, "FIELDS stay categorical"
+    assert model.vocabs[2] is None, "a non-FIELDS column must not get a vocabulary"
+    n_bins = len(model.numeric_edges[2]) + 1
+    assert n_bins <= NUMERIC_BINS + 1
+    # The defect: one slot per distinct value. 400 rows of distinct floats.
+    assert n_bins < len(X) / 10
+
+
+def test_fm_binned_feature_has_no_unseen_values_at_prediction_time():
+    """The damaging half of the old behaviour. Memorised floats meant unseen
+    validation values fell through to a single `unknown` slot -- measured at
+    100% of rows for several real features, making them a constant at scoring
+    time after polluting training with a million noise embeddings."""
+    train = _mixed_matrix()
+    held_out = _mixed_matrix(120)[:, :]
+    held_out[:, 2] = np.asarray(np.random.default_rng(7).random(120), dtype=object)
+    model = FM(seed=0, feature_names=_MIXED_NAMES)
+
+    model._fit_encoder(train)
+    seen = set(model._encode(train)[:, 2].tolist())
+    unseen = [v for v in model._encode(held_out)[:, 2].tolist() if v not in seen]
+
+    assert unseen == []
+
+
+def test_fm_without_feature_names_keeps_the_all_categorical_behaviour():
+    """Backward compatibility for every direct FM(...) caller, including the
+    0.6016 baseline reproduction test above, which passes no names."""
+    X = _mixed_matrix()
+    model = FM(seed=0)
+
+    model._fit_encoder(X)
+
+    assert all(vocab is not None for vocab in model.vocabs)
+    assert all(edges is None for edges in model.numeric_edges)
+
+
+def test_fm_encoding_is_unchanged_for_the_five_official_fields():
+    """The production path supplies feature_names=FIELDS. Every one of them is
+    an identifier, so supplying them must not alter the encoding at all -- this
+    is what keeps the shipped 0.6016 baseline exactly where it was."""
+    rng = np.random.default_rng(1)
+    X = np.column_stack([
+        np.asarray([f"x{v}" for v in rng.integers(0, 30, 300)], dtype=object)
+        for _ in FIELDS
+    ]).astype(object)
+
+    named = FM(seed=0, feature_names=list(FIELDS))
+    unnamed = FM(seed=0)
+    named._fit_encoder(X)
+    unnamed._fit_encoder(X)
+
+    np.testing.assert_array_equal(named._encode(X), unnamed._encode(X))
+
+
+def test_fm_rejects_a_non_numeric_continuous_column_readably():
+    X = _mixed_matrix()
+    X[:, 2] = np.asarray(["not-a-number"] * len(X), dtype=object)
+    model = FM(seed=0, feature_names=_MIXED_NAMES)
+
+    with pytest.raises(ValueError, match="not numeric"):
+        model._fit_encoder(X)
+
+
+def test_fm_trains_end_to_end_with_a_continuous_feature():
+    X = _mixed_matrix()
+    y = (np.asarray([float(v) for v in X[:, 2]]) > 0.5).astype(float)
+    model = FM(seed=0, feature_names=_MIXED_NAMES, max_epochs=3, batch_size=64)
+
+    model.fit(X, y, None, None, groups=(X[:, 0], None))
+    scores = model.predict(X)
+
+    assert scores.shape == (len(X),)
+    assert np.isfinite(scores).all()
