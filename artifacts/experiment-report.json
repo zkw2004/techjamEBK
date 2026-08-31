@@ -1,0 +1,73 @@
+{
+  "results": [
+    {
+      "id": "n001",
+      "fidelity": "smoke",
+      "status": "ok",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n002",
+      "fidelity": "screen",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6053643502550826,
+      "ndcg": 0.48454435982937466,
+      "primary": 0.5449543550422287,
+      "delta_vs_baseline": -0.05664564495777136
+    },
+    {
+      "id": "n003",
+      "fidelity": "full",
+      "status": "ok",
+      "accepted": false,
+      "gauc": 0.6377010886757989,
+      "ndcg": 0.5216864636202064,
+      "primary": 0.5796937761480027,
+      "delta_vs_baseline": -0.021906223851997364
+    },
+    {
+      "id": "n004",
+      "fidelity": "smoke",
+      "status": "error",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    },
+    {
+      "id": "n005",
+      "fidelity": "smoke",
+      "status": "error",
+      "accepted": false,
+      "gauc": null,
+      "ndcg": null,
+      "primary": null,
+      "delta_vs_baseline": null
+    }
+  ],
+  "totals": {
+    "nodes": 5,
+    "tokens_in": 7456,
+    "tokens_out": 9691,
+    "tokens": 17147,
+    "gpu_hours": 0.0,
+    "manual_interventions": 0
+  },
+  "iterations": {
+    "pilot": 4,
+    "full": 1,
+    "other": 0,
+    "by_fidelity": {
+      "full": 1,
+      "screen": 1,
+      "smoke": 3
+    }
+  },
+  "manual_intervention_definition": "A completed node whose manual_intervention field is true; automated proposals, bounded retries, and recovery actions are not interventions."
+}

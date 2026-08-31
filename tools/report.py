@@ -22,6 +22,8 @@ BASELINE_TEST = 0.5946
 PILOT_FIDELITIES = {"smoke", "screen"}
 FULL_FIDELITIES = {"full", "confirm"}
 DEFAULT_TRAJECTORY = Path("artifacts/trajectory.png")
+DEFAULT_MARKDOWN_REPORT = Path("artifacts/experiment-report.md")
+DEFAULT_JSON_REPORT = Path("artifacts/experiment-report.json")
 
 
 def load_nodes(nodes_dir: Path) -> list[dict[str, Any]]:
@@ -208,6 +210,27 @@ def plot_trajectory(
     return destination
 
 
+def write_reports(
+    report: dict[str, Any],
+    *,
+    markdown_path: Path | str | None = None,
+    json_path: Path | str | None = None,
+) -> list[Path]:
+    """Write requested report formats and return their destination paths."""
+    written: list[Path] = []
+    for requested, content in (
+        (markdown_path, render_markdown(report)),
+        (json_path, json.dumps(report, indent=2) + "\n"),
+    ):
+        if requested is None:
+            continue
+        destination = Path(requested)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(content, encoding="utf-8")
+        written.append(destination)
+    return written
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nodes-dir", type=Path, default=Path("logs/nodes"))
@@ -216,10 +239,24 @@ def main(argv: list[str] | None = None) -> None:
         "--trajectory", type=Path,
         help=f"also write the D9 trajectory plot (recommended: {DEFAULT_TRAJECTORY})",
     )
+    parser.add_argument(
+        "--markdown-output", type=Path,
+        help=f"write the Markdown report (recommended: {DEFAULT_MARKDOWN_REPORT})",
+    )
+    parser.add_argument(
+        "--json-output", type=Path,
+        help=f"write the JSON report (recommended: {DEFAULT_JSON_REPORT})",
+    )
     args = parser.parse_args(argv)
     nodes = load_nodes(args.nodes_dir)
     report = build_report(nodes)
     print(json.dumps(report, indent=2) if args.json else render_markdown(report), end="")
+    for destination in write_reports(
+        report,
+        markdown_path=args.markdown_output,
+        json_path=args.json_output,
+    ):
+        print(f"Report: {destination}")
     if args.trajectory:
         destination = plot_trajectory(nodes, args.trajectory)
         print(f"Trajectory plot: {destination}")
