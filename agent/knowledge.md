@@ -112,10 +112,50 @@ Each cost real compute; repeating one wastes an iteration.
   values, identical across every candidate a user sees, so they cannot move a
   within-user metric except through a cross. `tools/screen.py` measures this;
   the sweep confirms it end to end.
-- **Nothing has ever been tuned.** There are zero `tune` nodes in the ledger
-  and no Optuna study on disk, for any model. Every result in this project is
-  on hand-picked defaults. `type="tune"` is wired and works — proposing a tuning
-  action is among the few genuinely unexplored moves available.
+- **Features are model-specific. The single-feature sweep above was run
+  against FM only, and that is the wrong shape for trees.** FM puts every
+  field it is handed into the second-order term, so an uninformative one is
+  added noise; LightGBM splits greedily and largely ignores one, while finding
+  interactions a factorisation cannot represent. Measured at full tier:
+
+  | LightGBM config | primary | vs 5 fields |
+  |---|---|---|
+  | 5 official fields | 0.598582 | — |
+  | `+ time` (`hour_of_day`, `day_of_week`) | 0.595708 | **−0.002873** |
+  | `+ video-side` (8 features) | 0.600523 | **+0.001941** |
+  | **`+ video-side + time` (15 features)** | **0.601344** | **+0.002762** |
+  | `+ ALL 19 features` | 0.598254 | −0.000328 |
+
+  Three things to take from this. The **video-side block**
+  (`video_ctr`, `video_impressions`, `video_duration`, `duration_bucket`,
+  `video_{click,like,follow,long_view}_rate_decayed`) is worth ~+0.0028 to
+  LightGBM and was *pure noise* for FM. Time features **hurt alone but help
+  combined with video** — trees found an interaction, so judge feature groups
+  jointly, not one at a time. And **more is not better**: all 19 features
+  scored *below* the 5 official fields, so subset choice matters more than
+  count. This is the largest single gain measured in the project, and no agent
+  run has ever proposed a LightGBM config with more than 5 features.
+
+- **Blending needs disagreeing parents, and `rank_avg` is the wrong default
+  here.** FM × DeepFM+SENet failed (per-user Spearman **+0.7975** — DeepFM
+  contains FM over the same fields, so "different model family" was a label,
+  not a mechanism). FM × LightGBM correlated less (**+0.7637**) and worked:
+  `logit_avg` gave **+0.001965** over FM with a 95% CI excluding zero, while
+  `rank_avg` — which `blend_method` defaults to — found nothing on the same
+  pair. Report the parent correlation before blending, and prefer
+  `logit_avg` unless there is a reason not to.
+
+- **Tuning a blend parent can hurt the blend.** An Optuna study over 7
+  LightGBM hyperparameters improved it alone (+0.00065) but cost the blend
+  **−0.00109**, because tuning pushed its rankings *closer* to FM's
+  (Spearman 0.7637 → 0.7878). Optimising ensemble members individually is not
+  the same as optimising the ensemble.
+
+- **Hyperparameter search is nearly flat on this task.** That LightGBM study
+  (25 trials over `learning_rate`, `num_leaves`, `min_data_in_leaf`,
+  `feature_fraction`, `bagging_fraction`, `lambda_l1`, `lambda_l2`) moved the
+  objective by +0.00065. `type="tune"` works and is cheap, but expect little
+  from hyperparameters alone relative to feature-set and model-class choices.
 
 ## Cautions from the literature
 
