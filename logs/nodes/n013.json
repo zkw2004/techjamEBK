@@ -1,0 +1,53 @@
+{
+  "id": "n013",
+  "parent": "n003",
+  "family": "feature",
+  "hypothesis": "Because scoring only compares items inside one user, the only features that can move the metric are item-side ones that vary across a user's candidates, and the organisers' one-at-a-time sweep tested each such feature alone against a five-field FM that already encodes item identity — so each individual item-side rate looked redundant with `video_id`'s embedding. I claim the three item-side historical signals are complementary rather than redundant with each other because they encode different mechanisms: `video_long_view_rate_decayed` (recency-weighted item propensity, robust to popularity drift), `video_completion_ratio_hist` (engagement depth independent of impression count), and `long_view_rate_by_duration_group` (the duration confound that makes long-view mechanically easier for short videos, which `dur_bucket` only captures as a coarse identity term). Added together on top of all five official fields with FM k=16, lr=0.001 held identical to n003, I predict full-tier primary >= 0.6036 (>= +0.002 over 0.6016), with the gain concentrated in the pop_q1/pop_q2 segments where n003 is weakest (0.4408/0.4836) because cold items have uninformative `video_id` embeddings and must be ranked from aggregate history, and near-zero change in pop_q4. If the combination lands inside noise of 0.6016, then item-side history is genuinely subsumed by the item-identity embedding at full fidelity and the entire feature drawer is closed, redirecting the remaining iterations to loss form (screen ablation's +0.0017 for pairwise) and ensembling. [ref: D2Q \\u2014 Zhan et al., KDD 2022]",
+  "reasoning": "families_covered shows feature=0 and ensemble=0, but eligible_blend_parents has only n003 so a blend is impossible this iteration; feature is therefore the uncovered family to hit. The only nominally feature-ish runs (n011/n012) were mislabelled 'model' and tested a single user-invariant-ish time field (day_of_week), which screened at 0.5737 vs base 0.5741 \\u2014 consistent with the organisers' finding that single features are inert. What is explicitly recorded as untested is feature *combinations* beyond the hour_of_day+day_of_week pair, so this proposes the one combination with a mechanism: three item-side aggregates that vary within a user (the only kind that can shift a within-user metric per the priors) and that encode distinct mechanisms rather than restating item popularity. n003 (full-tier 0.6016, accepted) is the correct parent for a like-for-like comparison, and all five official fields are retained. Avoids item_statistics_monthly and uses only registered names.",
+  "action_type": "config",
+  "fidelity": "smoke",
+  "config": {
+    "model": "fm",
+    "loss": "pointwise",
+    "features": [
+      "user_id",
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket",
+      "video_long_view_rate_decayed",
+      "video_completion_ratio_hist",
+      "long_view_rate_by_duration_group"
+    ],
+    "negative_sampling": "all",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "config: model=fm, loss=pointwise",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {},
+  "fold_primaries": [],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {
+    "in": 8755,
+    "out": 1675,
+    "model": "claude-opus-5",
+    "cache_read": 6444,
+    "cache_write": 0
+  },
+  "seconds": 1.6840130840428174,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-31T14:03:15Z",
+  "scheduler_forced": false,
+  "scheduler_strikes": 1
+}

@@ -1,11 +1,11 @@
 {
-  "id": "n005",
+  "id": "n007",
   "parent": "n003",
   "family": "model",
   "hypothesis": "The incumbent (n003) is undertuned rather than at its ceiling: searching learning rate and embedding capacity around its current values lifts validation primary by more than the 0.002 minimum meaningful delta. If the best trial lands inside that margin, this configuration is at its ceiling and the remaining headroom is not in its hyperparameters.",
   "reasoning": "Scheduler-forced hedge, not a free proposal: two consecutive iterations failed to improve the incumbent by more than epsilon and a third would let the convergence rule end the run. Refining a configuration already measured as good is the highest-probability action available, since it searches around a known-working point instead of testing an untried mechanism. The study scores on internal folds only, so it spends no official validation budget.",
   "action_type": "tune",
-  "fidelity": "smoke",
+  "fidelity": "screen",
   "config": {
     "model": "fm",
     "loss": "pointwise",
@@ -34,14 +34,20 @@
   "ci_95": null,
   "gates": {},
   "accepted": false,
-  "status": "ok",
-  "errors": [],
+  "status": "error",
+  "errors": [
+    {
+      "stage": "screen",
+      "error_class": "schema",
+      "traceback": "Traceback (most recent call last):\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/tune.py\", line 342, in run_study\n    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)\nBlockingIOError: [Errno 35] Resource temporarily unavailable\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"/Users/kaiwen/Documents/TechjamEBK/agent/execute.py\", line 455, in execute\n    result = _run_tune_action(action, config, fidelity, timeout_s)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/agent/execute.py\", line 92, in _run_tune_action\n    study = run_study(\n            ^^^^^^^^^^\n  File \"/Users/kaiwen/Documents/TechjamEBK/pipeline/tune.py\", line 344, in run_study\n    raise ValueError(f\"study {study_name!r} already has an active owner\") from exc\nValueError: study 'tune-f9d86376acdabdf4' already has an active owner\n"
+    }
+  ],
   "repair_attempted": false,
   "tokens": {},
-  "seconds": 1.4105134169803932,
+  "seconds": 0.0012145839864388108,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-31T14:01:03Z",
+  "timestamp": "2026-08-31T14:01:20Z",
   "scheduler_forced": true,
   "scheduler_strikes": 0
 }

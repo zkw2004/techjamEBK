@@ -1,11 +1,11 @@
 {
-  "id": "n005",
+  "id": "n020",
   "parent": "n003",
   "family": "model",
   "hypothesis": "The incumbent (n003) is undertuned rather than at its ceiling: searching learning rate and embedding capacity around its current values lifts validation primary by more than the 0.002 minimum meaningful delta. If the best trial lands inside that margin, this configuration is at its ceiling and the remaining headroom is not in its hyperparameters.",
   "reasoning": "Scheduler-forced hedge, not a free proposal: two consecutive iterations failed to improve the incumbent by more than epsilon and a third would let the convergence rule end the run. Refining a configuration already measured as good is the highest-probability action available, since it searches around a known-working point instead of testing an untried mechanism. The study scores on internal folds only, so it spends no official validation budget.",
   "action_type": "tune",
-  "fidelity": "smoke",
+  "fidelity": "full",
   "config": {
     "model": "fm",
     "loss": "pointwise",
@@ -18,8 +18,8 @@
     ],
     "negative_sampling": "all",
     "hparams": {
-      "k": 16,
-      "lr": 0.001
+      "k": 32,
+      "lr": 0.0016738085788752138
     },
     "parents": [],
     "blend_method": "rank_avg",
@@ -27,21 +27,62 @@
   },
   "diff": "hyperparameter search: ['k', 'lr']",
   "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
-  "metrics": {},
-  "fold_primaries": [],
-  "segments": {},
-  "delta_vs_best": null,
-  "ci_95": null,
-  "gates": {},
+  "metrics": {
+    "gauc": 0.6662004058928966,
+    "ndcg": 0.535073874284156,
+    "primary": 0.6006371400885263
+  },
+  "fold_primaries": [
+    0.600132066070738,
+    0.5681460035035495,
+    0.5605011407169809
+  ],
+  "segments": {
+    "activity_q1": 0.595773800745963,
+    "activity_q2": 0.605228659632713,
+    "activity_q3": 0.6063002725888913,
+    "activity_q4": 0.5926168330350835,
+    "pop_q1": 0.42934888570026564,
+    "pop_q2": 0.476359350047194,
+    "pop_q3": 0.5110328870418082,
+    "pop_q4": 0.5967628554004412,
+    "day1": 0.5449962878153785,
+    "day2": 0.5546635556285346,
+    "day3": 0.5224125159863126,
+    "day4": 0.5303941152689998,
+    "day5": 0.5254604471866944,
+    "day6": 0.5258072109632341,
+    "day7": 0.5307802987282265
+  },
+  "delta_vs_best": -0.0010468502933503876,
+  "ci_95": [
+    -0.0025605295813951935,
+    0.0004725260595106387
+  ],
+  "gates": {
+    "statistical": false,
+    "min_delta": false
+  },
   "accepted": false,
   "status": "ok",
   "errors": [],
   "repair_attempted": false,
   "tokens": {},
-  "seconds": 1.4105134169803932,
+  "seconds": 63.00085116701666,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-31T14:01:03Z",
+  "timestamp": "2026-08-31T14:05:07Z",
+  "tuning": {
+    "study": "tune-f9d86376acdabdf4",
+    "best_params": {
+      "lr": 0.0016738085788752138,
+      "k": 32
+    },
+    "best_value": 0.5754927615041823,
+    "n_pruned": 6,
+    "n_trials": 12,
+    "pruning_savings_fraction": 0.30068703767170213
+  },
   "scheduler_forced": true,
   "scheduler_strikes": 0
 }

@@ -1,3 +1,21 @@
-{"event": "promotion", "from": "screen", "to": "full", "node": "n003", "status": "ok", "manual_intervention": false, "timestamp": "2026-08-29T16:16:41Z"}
-{"event": "recovery", "node": "n004", "error_class": "schema", "attempt": 0, "decision": "repair", "manual_intervention": false, "fidelity": "smoke", "timestamp": "2026-08-29T16:17:48Z"}
-{"event": "recovery", "node": "n005", "error_class": "schema", "attempt": 1, "decision": "abandon", "manual_intervention": false, "timestamp": "2026-08-29T16:18:22Z"}
+{"event": "baseline_anchor", "node": "n003", "status": "ok", "primary": 0.6016839903818767, "manual_intervention": false, "timestamp": "2026-08-31T13:59:55Z"}
+{"event": "promotion", "from": "screen", "to": "full", "node": "n004", "status": "ok", "accepted": false, "manual_intervention": false, "timestamp": "2026-08-31T14:00:01Z"}
+{"event": "iteration", "strikes": 1, "hedges_fired": 0, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:00:01Z"}
+{"event": "proposal", "status": "error", "error_class": "transient", "error": "no valid Action after 2 attempts; last error: type='tune' requires a non-empty search_space", "tokens": {"in": 10111, "out": 2834, "model": "claude-opus-5", "cache_read": 12888, "cache_write": 0}, "manual_intervention": false, "timestamp": "2026-08-31T14:00:33Z"}
+{"event": "iteration", "strikes": 1, "hedges_fired": 0, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:00:33Z"}
+{"event": "proposal", "status": "error", "error_class": "transient", "error": "no valid Action after 2 attempts; last error: type='tune' requires a non-empty search_space", "tokens": {"in": 11471, "out": 4458, "model": "claude-opus-5", "cache_read": 12888, "cache_write": 0}, "manual_intervention": false, "timestamp": "2026-08-31T14:01:02Z"}
+{"event": "iteration", "strikes": 2, "hedges_fired": 0, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:01:02Z"}
+{"event": "proposal", "status": "error", "error_class": "transient", "error": "no valid Action after 2 attempts; last error: type='tune' requires a non-empty search_space", "tokens": {"in": 11389, "out": 3404, "model": "claude-opus-5", "cache_read": 12888, "cache_write": 0}, "manual_intervention": false, "timestamp": "2026-08-31T14:01:18Z"}
+{"event": "iteration", "strikes": 2, "hedges_fired": 0, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:01:18Z"}
+{"event": "recovery", "node": "n007", "error_class": "schema", "attempt": 0, "decision": "repair", "manual_intervention": false, "fidelity": "screen", "timestamp": "2026-08-31T14:01:20Z"}
+{"event": "iteration", "strikes": 1, "hedges_fired": 1, "scheduler_forced": true, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:01:42Z"}
+{"event": "iteration", "strikes": 2, "hedges_fired": 1, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:02:29Z"}
+{"event": "iteration", "strikes": 1, "hedges_fired": 2, "scheduler_forced": true, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:02:50Z"}
+{"event": "iteration", "strikes": 2, "hedges_fired": 2, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:04:06Z"}
+{"event": "iteration", "strikes": 1, "hedges_fired": 3, "scheduler_forced": true, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:04:24Z"}
+{"event": "promotion", "from": "screen", "to": "full", "node": "n020", "status": "ok", "accepted": false, "manual_intervention": false, "timestamp": "2026-08-31T14:05:07Z"}
+{"event": "iteration", "strikes": 1, "hedges_fired": 1, "scheduler_forced": true, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:05:07Z"}
+{"event": "promotion", "from": "screen", "to": "full", "node": "n021", "status": "ok", "accepted": false, "manual_intervention": false, "timestamp": "2026-08-31T14:05:44Z"}
+{"event": "iteration", "strikes": 2, "hedges_fired": 3, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:05:44Z"}
+{"event": "proposal", "status": "error", "error_class": "transient", "error": "no valid Action after 2 attempts; last error: type='tune' requires a non-empty search_space", "tokens": {"in": 28379, "out": 4301, "model": "claude-opus-5", "cache_read": 12888, "cache_write": 0}, "manual_intervention": false, "timestamp": "2026-08-31T14:06:03Z"}
+{"event": "iteration", "strikes": 2, "hedges_fired": 1, "scheduler_forced": false, "node": null, "manual_intervention": false, "timestamp": "2026-08-31T14:06:03Z"}

@@ -1,5 +1,5 @@
 {
-  "id": "n005",
+  "id": "n006",
   "parent": "n003",
   "family": "model",
   "hypothesis": "The incumbent (n003) is undertuned rather than at its ceiling: searching learning rate and embedding capacity around its current values lifts validation primary by more than the 0.002 minimum meaningful delta. If the best trial lands inside that margin, this configuration is at its ceiling and the remaining headroom is not in its hyperparameters.",
@@ -38,10 +38,10 @@
   "errors": [],
   "repair_attempted": false,
   "tokens": {},
-  "seconds": 1.4105134169803932,
+  "seconds": 1.5291903750039637,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-31T14:01:03Z",
+  "timestamp": "2026-08-31T14:01:20Z",
   "scheduler_forced": true,
   "scheduler_strikes": 0
 }

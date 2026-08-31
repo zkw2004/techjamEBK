@@ -1,0 +1,50 @@
+{
+  "id": "n009",
+  "parent": "n003",
+  "family": "training",
+  "hypothesis": "The scored metric only ever compares items shown to the same user, but n003 is fit against every impression in the corpus as an equally weighted negative, so most of its BCE gradient comes from easy cross-context pairs (a video from a different tab/session that the user would never have been ranked against) rather than from the hard within-session comparisons the metric actually asks about; restricting retained negatives to the same session (negative_sampling=\"in_session\", all five official fields, k=16, lr=0.001 held identical to n003) reweights the training distribution onto exactly those hard comparisons. I predict full-tier primary above 0.6036 (>= +0.002 over 0.6016), with the gain concentrated in activity_q3/q4 users (long lists, many in-session competitors) and in pop_q1/pop_q2 where the incumbent is weakest (0.4408/0.4836), and I predict no meaningful change or a small loss on activity_q1 users whose sessions contain too few impressions to form informative negatives. If in_session lands inside noise of 0.6016, the exposure distribution is not the bottleneck and the remaining headroom is not in which negatives are kept but in the loss form itself (the screen ablation's +0.0017 for pairwise), which would redirect the search to a pairwise FM rather than further sampling variants. [ref: BPR — Rendle 2009; LambdaRank]",
+  "reasoning": "families_covered shows training=0 and ensemble=0 while model=5 and objective=3, so the loop has only ever adjusted model class and loss; negative sampling is the one training-side axis this codebase exposes and it has never been touched. n003 (the accepted full-tier baseline, 0.6016) is the only valid parent for a like-for-like comparison, and I change exactly one field relative to it (negative_sampling all -> in_session), keeping the five official fields, pointwise loss and k=16/lr=0.001 fixed so the delta is attributable. A blend is impossible (eligible_blend_parents has only n003), and the feature axis is largely pre-measured dead (all 20 single features inside noise except hour_of_day/day_of_week, which are redundant with each other and under the 0.002 floor), so training is both the uncovered and the highest-information choice. The segment table from n003 gives the falsifiable sub-prediction: pop_q1/pop_q2 are near chance (0.44/0.48), which is what a mis-specified negative distribution over sparse items looks like.",
+  "action_type": "config",
+  "fidelity": "smoke",
+  "config": {
+    "model": "fm",
+    "loss": "pointwise",
+    "features": [
+      "user_id",
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket"
+    ],
+    "negative_sampling": "in_session",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "config: model=fm, loss=pointwise",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {},
+  "fold_primaries": [],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {
+    "in": 6527,
+    "out": 1792,
+    "model": "claude-opus-5",
+    "cache_read": 6444,
+    "cache_write": 0
+  },
+  "seconds": 1.4745366669958457,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-31T14:02:10Z",
+  "scheduler_forced": false,
+  "scheduler_strikes": 1
+}

@@ -1,63 +1,112 @@
 {
   "id": "n003",
   "parent": "n000",
-  "family": "objective",
-  "hypothesis": "Scoring only compares videos inside one user, so the part of the pointwise BCE objective that fits a user's overall long_view rate (a per-user constant) cannot change any within-user ordering and is wasted capacity. Replacing FM's pointwise BCE with BPR pairs sampled between a positive and a negative impression of the *same* user (in_session negatives) makes the training objective the same comparison the metric makes, so I predict validation primary rises above the FM baseline 0.6016 by at least +0.002 (i.e. >=0.6036), with the gain concentrated on users with many impressions and a mid-range positive rate, and near-zero change on users with very few impressions. If the pairwise variant lands within seed noise (+-0.0008) of 0.6016, then the pointwise/ranking mismatch is NOT the binding constraint here and the remaining headroom must be in features (user-history aggregates crossed with item terms) rather than in loss framing.",
-  "reasoning": "History is empty (only root n000), so this is the first probe and all five families are uncovered. The organisers rank loss framing as headroom item #1, and it is also the cheapest clean ablation: hold the model class (FM), the feature set (user_id x video_id, which the organisers say already absorbs most learnable signal) and the seed fixed, and change only the objective plus the negative-sampling scope needed to make pairs within-user. This isolates the loss effect against the known 0.6016 anchor, unlike jumping straight to LightGBM lambdarank which would confound loss with model class. The result also directly informs the next branch: a null result redirects the loop to the feature/history family instead of burning further iterations on objectives.",
+  "family": "model",
+  "hypothesis": "The official FM baseline (five fields, k=16, lr=0.001) reproduces validation primary 0.6016 and is the reference every later candidate must beat by at least the minimum meaningful delta.",
+  "reasoning": "Seeded by the loop, not proposed. A run with no baseline node has no valid comparison point: whichever candidate happened to run first would otherwise become the bar, and a below-baseline first result would make later non-improvements look like wins.",
   "action_type": "config",
   "fidelity": "full",
   "config": {
     "model": "fm",
-    "loss": "pairwise",
+    "loss": "pointwise",
     "features": [
       "user_id",
-      "video_id"
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket"
     ],
-    "negative_sampling": "in_session",
-    "hparams": {},
+    "negative_sampling": "all",
+    "hparams": {
+      "k": 16,
+      "lr": 0.001
+    },
     "parents": [],
     "blend_method": "rank_avg",
     "seed": 42
   },
-  "diff": "config: model=fm, loss=pairwise",
+  "diff": "config: model=fm, loss=pointwise",
   "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
   "metrics": {
-    "gauc": 0.6377010886757989,
-    "ndcg": 0.5216864636202064,
-    "primary": 0.5796937761480027
+    "gauc": 0.6673109387273293,
+    "ndcg": 0.5360570420364241,
+    "primary": 0.6016839903818767
   },
   "fold_primaries": [
-    0.5819323683981874,
-    0.5543291033285676,
-    0.5431180757226092
+    0.6022579576668827,
+    0.5698607445802084,
+    0.5598613365936052
   ],
   "segments": {
-    "activity_q1": 0.5833555388134462,
-    "activity_q2": 0.5859702537664009,
-    "activity_q3": 0.5833110737987734,
-    "activity_q4": 0.5676929969496394,
-    "pop_q1": 0.35728962820170906,
-    "pop_q2": 0.44619872492243945,
-    "pop_q3": 0.4891475388915757,
-    "pop_q4": 0.5814371820833644,
-    "day1": 0.5285515253896006,
-    "day2": 0.5402443065905065,
-    "day3": 0.5164056999756521,
-    "day4": 0.5057937980630123,
-    "day5": 0.5196620388818721,
-    "day6": 0.5097644473571173,
-    "day7": 0.5026564613901822
+    "activity_q1": 0.5957921677180044,
+    "activity_q2": 0.6038679300920637,
+    "activity_q3": 0.609084622396014,
+    "activity_q4": 0.5942360368547104,
+    "pop_q1": 0.4408280443435687,
+    "pop_q2": 0.4836276770061915,
+    "pop_q3": 0.513866262847566,
+    "pop_q4": 0.5976451931759785,
+    "day1": 0.5449455744687577,
+    "day2": 0.5550085486246599,
+    "day3": 0.5258244726068014,
+    "day4": 0.5291949737762753,
+    "day5": 0.5230549175046952,
+    "day6": 0.5232702848812656,
+    "day7": 0.5322372095844032
   },
-  "delta_vs_best": null,
+  "delta_vs_best": 8.399038187667518e-05,
   "ci_95": null,
-  "gates": {},
-  "accepted": false,
+  "gates": {
+    "baseline_anchor": true
+  },
+  "accepted": true,
   "status": "ok",
   "errors": [],
   "repair_attempted": false,
   "tokens": {},
-  "seconds": 51.117485333932564,
+  "seconds": 52.552630249992944,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-29T16:16:41Z"
+  "timestamp": "2026-08-31T13:59:55Z",
+  "ablation": {
+    "base_primary": 0.5741091786349903,
+    "components": [
+      {
+        "component": "feature:tab",
+        "primary": 0.5615786323094448,
+        "delta": -0.01253054632554551,
+        "sensitivity": 0.01253054632554551
+      },
+      {
+        "component": "feature:user_id",
+        "primary": 0.5685320222127864,
+        "delta": -0.0055771564222039105,
+        "sensitivity": 0.0055771564222039105
+      },
+      {
+        "component": "feature:dur_bucket",
+        "primary": 0.5712131369789825,
+        "delta": -0.002896041656007875,
+        "sensitivity": 0.002896041656007875
+      },
+      {
+        "component": "loss:pairwise",
+        "primary": 0.575843166481524,
+        "delta": 0.0017339878465336689,
+        "sensitivity": 0.0017339878465336689
+      },
+      {
+        "component": "feature:author_id",
+        "primary": 0.5735886416133589,
+        "delta": -0.000520537021631462,
+        "sensitivity": 0.000520537021631462
+      },
+      {
+        "component": "feature:video_id",
+        "primary": 0.5737062555796498,
+        "delta": -0.00040292305534050943,
+        "sensitivity": 0.00040292305534050943
+      }
+    ]
+  }
 }

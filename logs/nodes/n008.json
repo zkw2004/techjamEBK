@@ -1,11 +1,11 @@
 {
-  "id": "n005",
+  "id": "n008",
   "parent": "n003",
   "family": "model",
   "hypothesis": "The incumbent (n003) is undertuned rather than at its ceiling: searching learning rate and embedding capacity around its current values lifts validation primary by more than the 0.002 minimum meaningful delta. If the best trial lands inside that margin, this configuration is at its ceiling and the remaining headroom is not in its hyperparameters.",
   "reasoning": "Scheduler-forced hedge, not a free proposal: two consecutive iterations failed to improve the incumbent by more than epsilon and a third would let the convergence rule end the run. Refining a configuration already measured as good is the highest-probability action available, since it searches around a known-working point instead of testing an untried mechanism. The study scores on internal folds only, so it spends no official validation budget.",
   "action_type": "tune",
-  "fidelity": "smoke",
+  "fidelity": "screen",
   "config": {
     "model": "fm",
     "loss": "pointwise",
@@ -25,7 +25,7 @@
     "blend_method": "rank_avg",
     "seed": 42
   },
-  "diff": "hyperparameter search: ['k', 'lr']",
+  "diff": "repair proposal could not be executed",
   "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
   "metrics": {},
   "fold_primaries": [],
@@ -34,14 +34,24 @@
   "ci_95": null,
   "gates": {},
   "accepted": false,
-  "status": "ok",
-  "errors": [],
-  "repair_attempted": false,
-  "tokens": {},
-  "seconds": 1.4105134169803932,
+  "status": "error",
+  "errors": [
+    {
+      "stage": "repair",
+      "error_class": "transient",
+      "traceback": "type='tune' requires a non-empty search_space"
+    }
+  ],
+  "repair_attempted": true,
+  "tokens": {
+    "in": 2458,
+    "out": 331,
+    "model": "claude-haiku-4-5",
+    "cache_read": 0,
+    "cache_write": 0
+  },
+  "seconds": 0.0,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-31T14:01:03Z",
-  "scheduler_forced": true,
-  "scheduler_strikes": 0
+  "timestamp": "2026-08-31T14:01:26Z"
 }

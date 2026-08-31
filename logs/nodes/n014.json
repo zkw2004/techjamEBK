@@ -1,11 +1,11 @@
 {
-  "id": "n005",
+  "id": "n014",
   "parent": "n003",
   "family": "model",
   "hypothesis": "The incumbent (n003) is undertuned rather than at its ceiling: searching learning rate and embedding capacity around its current values lifts validation primary by more than the 0.002 minimum meaningful delta. If the best trial lands inside that margin, this configuration is at its ceiling and the remaining headroom is not in its hyperparameters.",
   "reasoning": "Scheduler-forced hedge, not a free proposal: two consecutive iterations failed to improve the incumbent by more than epsilon and a third would let the convergence rule end the run. Refining a configuration already measured as good is the highest-probability action available, since it searches around a known-working point instead of testing an untried mechanism. The study scores on internal folds only, so it spends no official validation budget.",
   "action_type": "tune",
-  "fidelity": "smoke",
+  "fidelity": "screen",
   "config": {
     "model": "fm",
     "loss": "pointwise",
@@ -18,8 +18,8 @@
     ],
     "negative_sampling": "all",
     "hparams": {
-      "k": 16,
-      "lr": 0.001
+      "k": 32,
+      "lr": 0.0016738085788752138
     },
     "parents": [],
     "blend_method": "rank_avg",
@@ -27,8 +27,16 @@
   },
   "diff": "hyperparameter search: ['k', 'lr']",
   "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
-  "metrics": {},
-  "fold_primaries": [],
+  "metrics": {
+    "gauc": 0.6529418064659377,
+    "ndcg": 0.498043716542427,
+    "primary": 0.5754927615041823
+  },
+  "fold_primaries": [
+    0.600132066070738,
+    0.567917025417224,
+    0.5584291930245848
+  ],
   "segments": {},
   "delta_vs_best": null,
   "ci_95": null,
@@ -38,10 +46,21 @@
   "errors": [],
   "repair_attempted": false,
   "tokens": {},
-  "seconds": 1.4105134169803932,
+  "seconds": 165.65465954202227,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-31T14:01:03Z",
+  "timestamp": "2026-08-31T14:03:49Z",
+  "tuning": {
+    "study": "tune-f9d86376acdabdf4",
+    "best_params": {
+      "lr": 0.0016738085788752138,
+      "k": 32
+    },
+    "best_value": 0.5754927615041823,
+    "n_pruned": 6,
+    "n_trials": 12,
+    "pruning_savings_fraction": 0.30068703767170213
+  },
   "scheduler_forced": true,
   "scheduler_strikes": 0
 }

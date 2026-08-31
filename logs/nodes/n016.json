@@ -1,0 +1,48 @@
+{
+  "id": "n016",
+  "parent": "n003",
+  "family": "model",
+  "hypothesis": "Adding the registered feature 'duration_bucket' to the incumbent (n003) supplies signal its current feature set does not carry, and lifts validation primary by more than the 0.002 minimum meaningful delta. If it lands inside that margin, this feature is inert for this model and the feature drawer is not where the remaining headroom is. The last ablation of n003 ranked feature:tab most sensitive (|delta| 0.012531), so the incumbent's score is not saturated in its feature block.",
+  "reasoning": "Scheduler-forced hedge, not a free proposal: two consecutive iterations failed to improve the incumbent by more than epsilon, and a third would let the convergence rule end the run. A single registered feature added to a known-good config is the highest-probability action available, and it holds model, loss and seed fixed so any delta is attributable to the feature alone.",
+  "action_type": "config",
+  "fidelity": "smoke",
+  "config": {
+    "model": "fm",
+    "loss": "pointwise",
+    "features": [
+      "user_id",
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket",
+      "duration_bucket"
+    ],
+    "negative_sampling": "all",
+    "hparams": {
+      "k": 16,
+      "lr": 0.001
+    },
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "config: model=fm, loss=pointwise",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {},
+  "fold_primaries": [],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {},
+  "seconds": 1.4049121669959277,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-31T14:04:07Z",
+  "scheduler_forced": true,
+  "scheduler_strikes": 0
+}

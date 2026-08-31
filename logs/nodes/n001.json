@@ -1,25 +1,28 @@
 {
   "id": "n001",
-  "parent": "n000",
+  "parent": "n001",
   "family": "objective",
-  "hypothesis": "Scoring only compares videos inside one user, so the part of the pointwise BCE objective that fits a user's overall long_view rate (a per-user constant) cannot change any within-user ordering and is wasted capacity. Replacing FM's pointwise BCE with BPR pairs sampled between a positive and a negative impression of the *same* user (in_session negatives) makes the training objective the same comparison the metric makes, so I predict validation primary rises above the FM baseline 0.6016 by at least +0.002 (i.e. >=0.6036), with the gain concentrated on users with many impressions and a mid-range positive rate, and near-zero change on users with very few impressions. If the pairwise variant lands within seed noise (+-0.0008) of 0.6016, then the pointwise/ranking mismatch is NOT the binding constraint here and the remaining headroom must be in features (user-history aggregates crossed with item terms) rather than in loss framing.",
-  "reasoning": "History is empty (only root n000), so this is the first probe and all five families are uncovered. The organisers rank loss framing as headroom item #1, and it is also the cheapest clean ablation: hold the model class (FM), the feature set (user_id x video_id, which the organisers say already absorbs most learnable signal) and the seed fixed, and change only the objective plus the negative-sampling scope needed to make pairs within-user. This isolates the loss effect against the known 0.6016 anchor, unlike jumping straight to LightGBM lambdarank which would confound loss with model class. The result also directly informs the next branch: a null result redirects the loop to the feature/history family instead of burning further iterations on objectives.",
+  "hypothesis": "GAUC and nDCG@5 are computed per user, but the FM baseline (n001) is fit with pointwise BCE on a global objective, so items are calibrated across users rather than ordered within one; training LightGBM with `lambdarank` and a per-user group array makes the training objective a within-user list objective and additionally lets axis-aligned splits capture the tab \\u00d7 dur_bucket interactions the ablation shows the incumbent leans on most (sensitivity 0.0125 and 0.0029). I predict full-tier primary above 0.6036 (>= +0.002 over 0.6016), with the gain concentrated on high-impression users (activity_q3/q4 segments) where per-user lists are long enough for the lambda gradients to differ from BCE, and little or no gain on activity_q1; if lambdarank lands inside noise of 0.6016 that falsifies the loss-mismatch story and points the remaining headroom at time/drift features instead. [ref: BPR \\u2014 Rendle 2009; LambdaRank]",
+  "reasoning": "families_covered shows objective, feature, training and ensemble all at zero, so an objective move is the first uncovered family and the organisers rank loss framing as headroom #1. Branching from the global best n001 (AIDE-style branch-from-best). The screen-tier ablation on n001 gives loss:pairwise a +0.0017 sensitivity \\u2014 the only positive component \\u2014 which is weak direct evidence that a ranking-aligned objective helps, but pairwise BPR on FM samples pairs while lambdarank optimises the whole per-user list with an nDCG-weighted gradient, i.e. it targets the scored metric more directly. Secondary payoff: the priors record that FM \\u00d7 LightGBM parents correlate only +0.7637 and that a logit_avg blend of them gave +0.001965 with a CI excluding zero, so a successful full-tier LGBM node also unlocks the one ensemble pairing known to disagree with FM (eligible_blend_parents currently holds only n001, making a blend impossible this iteration). All five official fields are listed explicitly for a like-for-like comparison against 0.6016, and hparams are left at defaults so this node is a clean loss/model contrast that a later tune node can refine.",
   "action_type": "config",
   "fidelity": "smoke",
   "config": {
-    "model": "fm",
-    "loss": "pairwise",
+    "model": "lgbm",
+    "loss": "lambdarank",
     "features": [
       "user_id",
-      "video_id"
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket"
     ],
-    "negative_sampling": "in_session",
+    "negative_sampling": "all",
     "hparams": {},
     "parents": [],
     "blend_method": "rank_avg",
     "seed": 42
   },
-  "diff": "config: model=fm, loss=pairwise",
+  "diff": "config: model=lgbm, loss=lambdarank",
   "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
   "metrics": {},
   "fold_primaries": [],
@@ -32,14 +35,16 @@
   "errors": [],
   "repair_attempted": false,
   "tokens": {
-    "in": 164,
-    "out": 1476,
+    "in": 3393,
+    "out": 1976,
     "model": "claude-opus-5",
     "cache_read": 0,
-    "cache_write": 3992
+    "cache_write": 6444
   },
-  "seconds": 1.4647069170605391,
+  "seconds": 2.2870059589622542,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-29T16:15:37Z"
+  "timestamp": "2026-08-31T13:57:37Z",
+  "scheduler_forced": false,
+  "scheduler_strikes": 0
 }

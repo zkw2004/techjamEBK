@@ -1,39 +1,74 @@
 {
   "id": "n004",
-  "parent": "n000",
-  "family": "feature",
-  "hypothesis": "The failure of within-user BPR (n001-n003, best 0.5797 vs the 0.6016 pointwise anchor) says the loss/metric mismatch is not the binding constraint; the binding constraint is that user_id x video_id embeddings have no usable prior for items the user has few or no co-occurrences with, which is exactly where n003 collapses (pop_q1 = 0.357, pop_q2 = 0.446 vs pop_q4 = 0.581). I claim that a causal, past-dates-only, EB-smoothed item-side history feature (item long_view rate and item exposure count, decile-binned, computed for each date using only strictly earlier dates) carries item quality signal that varies within a user and therefore can reorder impressions, and that adding it plus a decile-binned user historical long_view rate (which is inert on its own but becomes an active user x item cross inside FM) to the FM pointwise baseline lifts validation primary by at least +0.002 above 0.6016, with the gain concentrated in the pop_q1/pop_q2 (rare-item) segments and near zero in pop_q4 where the ID embeddings are already well estimated. If primary moves less than +0.002 and the pop_q1/q2 segments do not improve, then item-side historical propensity is already absorbed by the video_id embedding and the remaining headroom is not in static-plus-aggregate features at all, redirecting the loop to sequence/multi-task representations.",
-  "reasoning": "The objective family has now been probed three times (n001, n002, n003) with the same claim and all three landed well below the 0.6016 FM anchor, so the pointwise/ranking framing is falsified as the headroom and further loss tinkering is low value. families_covered shows feature/model/training/ensemble all at 0, and the organisers' note that pure user-side first-order terms are exactly zero tells me the only legal way to use user history is through a cross, which FM supplies automatically once the user aggregate is a categorical field. The n003 segment table gives the concrete target: the popularity-quartile gradient (0.357 -> 0.581) is by far the largest structured error in the run so far, and item-side historical statistics are the cheapest legal fix (item_statistics_monthly is banned, so the aggregate must be built in-fold from past dates only). I hold model class (FM), loss (pointwise, as in the n000 baseline) and seed fixed so the delta is attributable to the features alone.",
-  "action_type": "code",
-  "fidelity": "smoke",
-  "config": {},
-  "diff": "generated Python source executed in isolated subprocess",
-  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
-  "metrics": {},
-  "fold_primaries": [],
-  "segments": {},
-  "delta_vs_best": null,
-  "ci_95": null,
-  "gates": {},
-  "accepted": false,
-  "status": "error",
-  "errors": [
-    {
-      "stage": "validation",
-      "error_class": "schema",
-      "traceback": "type='code' requires a concrete config before execution"
-    }
-  ],
-  "repair_attempted": false,
-  "tokens": {
-    "in": 2681,
-    "out": 5507,
-    "model": "claude-opus-5",
-    "cache_read": 3992,
-    "cache_write": 0
+  "parent": "n001",
+  "family": "objective",
+  "hypothesis": "GAUC and nDCG@5 are computed per user, but the FM baseline (n001) is fit with pointwise BCE on a global objective, so items are calibrated across users rather than ordered within one; training LightGBM with `lambdarank` and a per-user group array makes the training objective a within-user list objective and additionally lets axis-aligned splits capture the tab \\u00d7 dur_bucket interactions the ablation shows the incumbent leans on most (sensitivity 0.0125 and 0.0029). I predict full-tier primary above 0.6036 (>= +0.002 over 0.6016), with the gain concentrated on high-impression users (activity_q3/q4 segments) where per-user lists are long enough for the lambda gradients to differ from BCE, and little or no gain on activity_q1; if lambdarank lands inside noise of 0.6016 that falsifies the loss-mismatch story and points the remaining headroom at time/drift features instead. [ref: BPR \\u2014 Rendle 2009; LambdaRank]",
+  "reasoning": "families_covered shows objective, feature, training and ensemble all at zero, so an objective move is the first uncovered family and the organisers rank loss framing as headroom #1. Branching from the global best n001 (AIDE-style branch-from-best). The screen-tier ablation on n001 gives loss:pairwise a +0.0017 sensitivity \\u2014 the only positive component \\u2014 which is weak direct evidence that a ranking-aligned objective helps, but pairwise BPR on FM samples pairs while lambdarank optimises the whole per-user list with an nDCG-weighted gradient, i.e. it targets the scored metric more directly. Secondary payoff: the priors record that FM \\u00d7 LightGBM parents correlate only +0.7637 and that a logit_avg blend of them gave +0.001965 with a CI excluding zero, so a successful full-tier LGBM node also unlocks the one ensemble pairing known to disagree with FM (eligible_blend_parents currently holds only n001, making a blend impossible this iteration). All five official fields are listed explicitly for a like-for-like comparison against 0.6016, and hparams are left at defaults so this node is a clean loss/model contrast that a later tune node can refine.",
+  "action_type": "config",
+  "fidelity": "full",
+  "config": {
+    "model": "lgbm",
+    "loss": "lambdarank",
+    "features": [
+      "user_id",
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket"
+    ],
+    "negative_sampling": "all",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
   },
-  "seconds": 1.837499439716339e-05,
+  "diff": "config: model=lgbm, loss=lambdarank",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {
+    "gauc": 0.6628964969784407,
+    "ndcg": 0.5343172975262839,
+    "primary": 0.5986068972523623
+  },
+  "fold_primaries": [
+    0.5999993051742301,
+    0.5672245515316057,
+    0.5578130307602214
+  ],
+  "segments": {
+    "activity_q1": 0.5956056913538517,
+    "activity_q2": 0.6032334153210674,
+    "activity_q3": 0.6057953910847914,
+    "activity_q4": 0.588638402884304,
+    "pop_q1": 0.4095526591658384,
+    "pop_q2": 0.48329110803975484,
+    "pop_q3": 0.5041627278643621,
+    "pop_q4": 0.5978303324084003,
+    "day1": 0.5400820748141809,
+    "day2": 0.5508243082313908,
+    "day3": 0.523201160051322,
+    "day4": 0.528347394424207,
+    "day5": 0.5212437997970136,
+    "day6": 0.5221801589104953,
+    "day7": 0.523799145972541
+  },
+  "delta_vs_best": -0.00307709312951443,
+  "ci_95": [
+    -0.005124917809281185,
+    -0.001021459614287987
+  ],
+  "gates": {
+    "statistical": false,
+    "min_delta": false
+  },
+  "accepted": false,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {},
+  "seconds": 72.69534741702955,
   "gpu_seconds": 0.0,
   "manual_intervention": false,
-  "timestamp": "2026-08-29T16:17:48Z"
+  "timestamp": "2026-08-31T14:00:01Z",
+  "scheduler_forced": false,
+  "scheduler_strikes": 0
 }

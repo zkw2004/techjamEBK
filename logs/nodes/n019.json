@@ -1,0 +1,52 @@
+{
+  "id": "n019",
+  "parent": "n003",
+  "family": "objective",
+  "hypothesis": "n003 is fit with pointwise BCE, whose gradient is dominated by getting each impression's absolute probability right across the whole corpus, but the metric never compares two users' scores: GAUC integrates within-user pairwise orderings and nDCG@5 only reads the top of each user's list. BPR replaces that global likelihood with an explicit within-user positive-vs-sampled-negative margin, so every gradient step moves exactly the comparison the metric charges for, and with the five official fields held identical (k=16, lr=0.001) the only thing changing is the objective. The screen-tier ablation of n003 already showed loss:pairwise as the single positive component (+0.001734 at capped epochs), and I claim that is budget-suppressed rather than at ceiling because BPR needs more passes to see enough sampled pairs per user; at full tier I predict primary >= 0.6036 (>= +0.002 over 0.6016), with the gain concentrated in activity_q3/q4 (long lists give many informative in-user pairs) and in pop_q1/pop_q2 where n003 is weakest (0.4408/0.4836), and roughly flat on activity_q1 users with only a handful of impressions. If pairwise FM lands inside noise of 0.6016, then combined with the failed lambdarank node (n004, 0.5986) the loss-mismatch story is falsified for this dataset, and the remaining headroom must be sought in model class (LHUC/SENet gating on DeepFM) and in ensembling genuinely decorrelated families rather than in further objective variants. [ref: BPR — Rendle 2009; LambdaRank]",
+  "reasoning": "Ensemble is the only uncovered family but eligible_blend_parents contains a single node (n003), so a blend is impossible this iteration; producing a second strong full-tier node is the prerequisite for ever covering it. Among remaining options, the ablation table on n003 gives exactly one positive signal (loss:pairwise, +0.001734) and FM+pairwise has never been run as a node: the objective nodes in the ledger (n001/n002/n004) are three fidelities of the same lgbm lambdarank experiment, so the pairwise-FM branch of the loss-framing hypothesis is untested. Feature-side moves are poorly supported here: n012 (day_of_week), n015 (three item-side history rates) and n017 (duration_bucket) all landed at screen primary ~0.574, i.e. inside noise of the 0.5741 screen base, and n010 showed the training axis (in_session negatives) is actively harmful (-0.015). Config is held identical to n003 except loss so the comparison is like-for-like, and if it succeeds it also yields a second blend parent whose errors differ from n003 by construction (different objective, same features).",
+  "action_type": "config",
+  "fidelity": "screen",
+  "config": {
+    "model": "fm",
+    "loss": "pairwise",
+    "features": [
+      "user_id",
+      "video_id",
+      "author_id",
+      "tab",
+      "dur_bucket"
+    ],
+    "negative_sampling": "all",
+    "hparams": {},
+    "parents": [],
+    "blend_method": "rank_avg",
+    "seed": 42
+  },
+  "diff": "config: model=fm, loss=pairwise",
+  "manifest_sha256": "acdd2ebebf00e21f0331fe3cdc6c18e8b91e4b9a5125526c2d5fe06fe0ad56e2",
+  "metrics": {
+    "gauc": 0.6537645914040132,
+    "ndcg": 0.4979217415590346,
+    "primary": 0.575843166481524
+  },
+  "fold_primaries": [
+    0.6007075531355566,
+    0.569657351871956,
+    0.5571645944370593
+  ],
+  "segments": {},
+  "delta_vs_best": null,
+  "ci_95": null,
+  "gates": {},
+  "accepted": false,
+  "status": "ok",
+  "errors": [],
+  "repair_attempted": false,
+  "tokens": {},
+  "seconds": 11.178565250011161,
+  "gpu_seconds": 0.0,
+  "manual_intervention": false,
+  "timestamp": "2026-08-31T14:05:07Z",
+  "scheduler_forced": false,
+  "scheduler_strikes": 1
+}
